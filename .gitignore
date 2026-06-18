@@ -7,3 +7,5 @@ coverage/
 .env*
 !.env.example
 drive-credentials.json
+firebase-service-account.json
+

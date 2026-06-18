@@ -7,17 +7,54 @@ import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { google } from "googleapis";
 import multer from "multer";
+import { initializeApp, cert } from "firebase-admin/app";
+import { getFirestore, Firestore } from "firebase-admin/firestore";
 
 dotenv.config();
-
-// Safe fallback path variables are not needed since we use process.cwd() for persistent file resolution
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
 
-const CREDENTIALS_PATH = path.join(process.cwd(), "drive-credentials.json");
+// Session Middleware to parse/assign session cookie
+app.use((req, res, next) => {
+  const cookieHeader = req.headers.cookie || "";
+  const match = cookieHeader.match(/session_id=([^;]+)/);
+  let sessionId = match ? match[1] : null;
+
+  if (!sessionId) {
+    sessionId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    res.cookie("session_id", sessionId, { httpOnly: true, path: "/", maxAge: 365 * 24 * 60 * 60 * 1000, sameSite: "lax" });
+  }
+  (req as any).sessionId = sessionId;
+  next();
+});
+
+// Initialize Firebase Admin SDK
+const FIREBASE_CREDENTIALS_PATH = path.join(process.cwd(), "firebase-service-account.json");
+let db: Firestore | null = null;
+
+try {
+  let serviceAccount: any = null;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } else if (fs.existsSync(FIREBASE_CREDENTIALS_PATH)) {
+    serviceAccount = JSON.parse(fs.readFileSync(FIREBASE_CREDENTIALS_PATH, "utf-8"));
+  }
+
+  if (serviceAccount) {
+    initializeApp({
+      credential: cert(serviceAccount)
+    });
+    db = getFirestore();
+    console.log("Firebase Admin SDK initialized successfully.");
+  } else {
+    console.warn("Neither FIREBASE_SERVICE_ACCOUNT env var nor firebase-service-account.json found. Firebase Firestore is offline.");
+  }
+} catch (e) {
+  console.error("Failed to initialize Firebase Admin SDK:", e);
+}
 
 interface SavedCredentials {
   refreshToken: string;
@@ -26,37 +63,64 @@ interface SavedCredentials {
   ownerEmail?: string;
 }
 
-// Read saved credentials containing OAuth refresh token and created folder ID
-function getSavedCredentials(): SavedCredentials | null {
-  if (fs.existsSync(CREDENTIALS_PATH)) {
-    try {
-      const data = fs.readFileSync(CREDENTIALS_PATH, "utf-8");
-      return JSON.parse(data);
-    } catch (e) {
-      console.error("Error reading saved credentials:", e);
+// Read saved credentials containing OAuth refresh token and created folder ID from Firestore
+async function getSavedCredentials(sessionId: string): Promise<SavedCredentials | null> {
+  if (!db) {
+    console.error("Firebase Firestore is not initialized.");
+    return null;
+  }
+  try {
+    const doc = await db.collection("sessions").doc(sessionId).get();
+    if (doc.exists) {
+      return doc.data() as SavedCredentials;
     }
+  } catch (e) {
+    console.error("Error reading saved credentials from Firestore:", e);
   }
   return null;
 }
 
-// Save credentials safely to persist connection across dev container restarts
-function saveCredentials(creds: SavedCredentials) {
+// Save credentials safely to Firestore
+async function saveCredentials(sessionId: string, creds: SavedCredentials) {
+  if (!db) {
+    console.error("Firebase Firestore is not initialized.");
+    return;
+  }
   try {
-    fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(creds, null, 2), "utf-8");
+    await db.collection("sessions").doc(sessionId).set(creds, { merge: true });
   } catch (e) {
-    console.error("Error writing credentials file:", e);
+    console.error("Error writing credentials to Firestore:", e);
   }
 }
 
 // Delete credentials (disconnect)
-function deleteCredentials() {
-  if (fs.existsSync(CREDENTIALS_PATH)) {
-    try {
-      fs.unlinkSync(CREDENTIALS_PATH);
-    } catch (e) {
-      console.error("Error deleting credentials file:", e);
-    }
+async function deleteCredentials(sessionId: string) {
+  if (!db) {
+    console.error("Firebase Firestore is not initialized.");
+    return;
   }
+  try {
+    await db.collection("sessions").doc(sessionId).delete();
+  } catch (e) {
+    console.error("Error deleting credentials in Firestore:", e);
+  }
+}
+
+// Look up credentials by target folder ID to support guest access
+async function getSavedCredentialsForFolder(folderId: string): Promise<SavedCredentials | null> {
+  if (!db) {
+    console.error("Firebase Firestore is not initialized.");
+    return null;
+  }
+  try {
+    const snapshot = await db.collection("sessions").where("folderId", "==", folderId).limit(1).get();
+    if (!snapshot.empty) {
+      return snapshot.docs[0].data() as SavedCredentials;
+    }
+  } catch (e) {
+    console.error("Error querying credentials for folder in Firestore:", e);
+  }
+  return null;
 }
 
 // Instantiate OAuth Client lazily to prevent boot crashes if variables are missing
@@ -85,8 +149,7 @@ function getOAuthClient(customRedirectUri?: string) {
 }
 
 // Get authorized Drive Service Instance
-function getAuthorizedDriveClient() {
-  const creds = getSavedCredentials();
+function getAuthorizedDriveClient(creds: SavedCredentials) {
   if (!creds || !creds.refreshToken) {
     throw new Error("Google Drive is not connected. Authenticate as the Owner first.");
   }
@@ -104,7 +167,8 @@ const upload = multer({ dest: os.tmpdir() });
 
 // 1. App Connection & Auth Status Endpoint
 app.get("/api/status", async (req, res) => {
-  const creds = getSavedCredentials();
+  const sessionId = (req as any).sessionId;
+  const creds = await getSavedCredentials(sessionId);
   const rawClientId = process.env.GOOGLE_CLIENT_ID || "";
   const rawClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
   
@@ -149,7 +213,7 @@ app.get("/api/status", async (req, res) => {
           if (emailData && emailData.email) {
             ownerEmail = emailData.email;
             creds.ownerEmail = ownerEmail;
-            saveCredentials(creds);
+            await saveCredentials(sessionId, creds);
           }
         }
       }
@@ -161,7 +225,7 @@ app.get("/api/status", async (req, res) => {
   let storageQuota = null;
   if (creds && creds.refreshToken) {
     try {
-      const drive = getAuthorizedDriveClient();
+      const drive = getAuthorizedDriveClient(creds);
       const aboutRes = await drive.about.get({
         fields: "storageQuota",
       });
@@ -269,6 +333,7 @@ app.get("/api/auth/url", (req, res) => {
 // 3. OAuth Callback redirect handler
 app.get("/api/oauth/callback", async (req, res) => {
   const { code, error, state } = req.query;
+  const sessionId = (req as any).sessionId;
 
   let redirectOrigin = "";
   if (state && typeof state === "string") {
@@ -347,7 +412,7 @@ app.get("/api/oauth/callback", async (req, res) => {
     let refreshToken = tokens.refresh_token;
 
     if (!refreshToken) {
-      const currentCreds = getSavedCredentials();
+      const currentCreds = await getSavedCredentials(sessionId);
       if (currentCreds && currentCreds.refreshToken) {
         refreshToken = currentCreds.refreshToken;
       } else {
@@ -375,7 +440,7 @@ app.get("/api/oauth/callback", async (req, res) => {
     }
 
     // Save refresh token and keep previous folder attributes if they already exist
-    const currentCreds = getSavedCredentials();
+    const currentCreds = await getSavedCredentials(sessionId);
     
     let resolvedEmail = currentCreds?.ownerEmail || "";
     try {
@@ -393,7 +458,7 @@ app.get("/api/oauth/callback", async (req, res) => {
       console.error("Failed to query email during auth callback:", e);
     }
 
-    saveCredentials({
+    await saveCredentials(sessionId, {
       refreshToken,
       ownerEmail: resolvedEmail || undefined,
       ...(currentCreds && currentCreds.folderId ? { folderId: currentCreds.folderId } : {}),
@@ -445,16 +510,21 @@ app.get("/api/oauth/callback", async (req, res) => {
 });
 
 // 4. Logout / Disconnect Google Drive
-app.post("/api/disconnect", (req, res) => {
-  deleteCredentials();
+app.post("/api/disconnect", async (req, res) => {
+  const sessionId = (req as any).sessionId;
+  await deleteCredentials(sessionId);
   res.json({ success: true });
 });
 
 // 5. Gallery Photo Listing
 app.get("/api/photos", async (req, res) => {
   const queryFolderId = req.query.folderId as string;
+  const sessionId = (req as any).sessionId;
   try {
-    const creds = getSavedCredentials();
+    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    if (!creds) {
+      creds = await getSavedCredentials(sessionId);
+    }
     if (!creds) {
       return res.json({ connected: false, photos: [] });
     }
@@ -464,7 +534,7 @@ app.get("/api/photos", async (req, res) => {
       return res.json({ connected: false, photos: [] });
     }
 
-    const drive = getAuthorizedDriveClient();
+    const drive = getAuthorizedDriveClient(creds);
     
     // If a custom folderId is specified, fetch its metadata to get the name
     let folderName = creds.folderName || "App Uploads Gallery";
@@ -503,8 +573,17 @@ app.get("/api/photos", async (req, res) => {
 // 6. Direct secure image streaming proxy (bypasses permissions roadblock)
 app.get("/api/photos/view/:fileId", async (req, res) => {
   const { fileId } = req.params;
+  const queryFolderId = req.query.folderId as string;
+  const sessionId = (req as any).sessionId;
   try {
-    const drive = getAuthorizedDriveClient();
+    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    if (!creds) {
+      creds = await getSavedCredentials(sessionId);
+    }
+    if (!creds) {
+      return res.status(404).send("Google Drive connection not found.");
+    }
+    const drive = getAuthorizedDriveClient(creds);
 
     const metadata = await drive.files.get({
       fileId,
@@ -540,8 +619,13 @@ app.post("/api/upload", upload.single("photo"), async (req, res) => {
   }
 
   try {
-    const creds = getSavedCredentials();
     const queryFolderId = (req.body.folderId || req.query.folderId) as string;
+    const sessionId = (req as any).sessionId;
+    
+    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    if (!creds) {
+      creds = await getSavedCredentials(sessionId);
+    }
     const targetFolderId = queryFolderId || (creds ? creds.folderId : null);
 
     if (!creds || !targetFolderId) {
@@ -549,7 +633,7 @@ app.post("/api/upload", upload.single("photo"), async (req, res) => {
       return res.status(400).json({ error: "No active destination folder has been selected. Ask the owner to select a gallery of preference first." });
     }
 
-    const drive = getAuthorizedDriveClient();
+    const drive = getAuthorizedDriveClient(creds);
 
     const fileMetadata = {
       name: req.file.originalname,
@@ -591,8 +675,17 @@ app.post("/api/upload", upload.single("photo"), async (req, res) => {
 // 8. Delete / Trash accidental guest uploads
 app.post("/api/delete/:fileId", async (req, res) => {
   const { fileId } = req.params;
+  const queryFolderId = req.query.folderId as string;
+  const sessionId = (req as any).sessionId;
   try {
-    const drive = getAuthorizedDriveClient();
+    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    if (!creds) {
+      creds = await getSavedCredentials(sessionId);
+    }
+    if (!creds) {
+      return res.status(400).json({ error: "Google Drive is not connected." });
+    }
+    const drive = getAuthorizedDriveClient(creds);
     
     await drive.files.update({
       fileId,
@@ -610,8 +703,13 @@ app.post("/api/delete/:fileId", async (req, res) => {
 
 // 9. List Google Drive Folders
 app.get("/api/folders", async (req, res) => {
+  const sessionId = (req as any).sessionId;
   try {
-    const drive = getAuthorizedDriveClient();
+    const creds = await getSavedCredentials(sessionId);
+    if (!creds) {
+      return res.json({ folders: [] });
+    }
+    const drive = getAuthorizedDriveClient(creds);
     const driveRes = await drive.files.list({
       q: "mimeType = 'application/vnd.google-apps.folder' and trashed = false",
       fields: "files(id, name)",
@@ -629,17 +727,18 @@ app.get("/api/folders", async (req, res) => {
 // 10. Select Active Folder
 app.post("/api/folders/select", async (req, res) => {
   const { folderId, folderName } = req.body;
+  const sessionId = (req as any).sessionId;
   if (!folderId || !folderName) {
     return res.status(400).json({ error: "Missing folderId or folderName" });
   }
   try {
-    const creds = getSavedCredentials();
+    const creds = await getSavedCredentials(sessionId);
     if (!creds) {
       return res.status(400).json({ error: "Google Drive is not connected." });
     }
     creds.folderId = folderId;
     creds.folderName = folderName;
-    saveCredentials(creds);
+    await saveCredentials(sessionId, creds);
     res.json({ success: true, folderId, folderName });
   } catch (err: any) {
     console.error("Folder select error:", err);
@@ -650,15 +749,16 @@ app.post("/api/folders/select", async (req, res) => {
 // 11. Create and Select New Folder
 app.post("/api/folders/create", async (req, res) => {
   const { name } = req.body;
+  const sessionId = (req as any).sessionId;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: "Folder name is required." });
   }
   try {
-    const creds = getSavedCredentials();
+    const creds = await getSavedCredentials(sessionId);
     if (!creds) {
       return res.status(400).json({ error: "Google Drive is not connected." });
     }
-    const drive = getAuthorizedDriveClient();
+    const drive = getAuthorizedDriveClient(creds);
     const fileMetadata = {
       name: name.trim(),
       mimeType: "application/vnd.google-apps.folder",
@@ -673,7 +773,7 @@ app.post("/api/folders/create", async (req, res) => {
     
     creds.folderId = newFolderId;
     creds.folderName = newFolderName;
-    saveCredentials(creds);
+    await saveCredentials(sessionId, creds);
     
     res.json({ success: true, folderId: newFolderId, folderName: newFolderName });
   } catch (err: any) {

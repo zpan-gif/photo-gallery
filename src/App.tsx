@@ -868,7 +868,7 @@ export default function App() {
         setBatchActionLabel(`Archiving "${photo.name}" (${i + 1}/${total})`);
         setBatchActionProgress(Math.round(10 + (i / total) * 75));
 
-        const res = await fetch(`/api/photos/view/${photo.id}`);
+        const res = await fetch(getPhotoViewUrl(photo.id));
         if (!res.ok) throw new Error(`Could not download image: ${photo.name}`);
         const blob = await res.blob();
 
@@ -925,7 +925,7 @@ export default function App() {
         setBatchActionLabel(`Fetching "${photo.name}" (${i + 1}/${total})`);
         setBatchActionProgress(Math.round(10 + (i / total) * 50));
 
-        const response = await fetch(`/api/photos/view/${photo.id}`);
+        const response = await fetch(getPhotoViewUrl(photo.id));
         if (!response.ok) throw new Error(`Failed to load picture item: ${photo.name}`);
         const blob = await response.blob();
 
@@ -960,7 +960,7 @@ export default function App() {
       if (selectedPhotos.length === 1) {
         const photo = selectedPhotos[0];
         const link = document.createElement("a");
-        link.href = `/api/photos/view/${photo.id}`;
+        link.href = getPhotoViewUrl(photo.id);
         link.download = photo.name;
         link.target = "_blank";
         link.rel = "noreferrer";
@@ -1013,7 +1013,8 @@ export default function App() {
           const id = photoIds[i];
           setBatchActionProgress(Math.round(10 + (i / total) * 80));
           try {
-            const res = await fetch(`/api/delete/${id}`, { method: "POST" });
+            const activeFolderId = guestFolderId || status?.folderId;
+            const res = await fetch(`/api/delete/${id}${activeFolderId ? `?folderId=${activeFolderId}` : ""}`, { method: "POST" });
             if (res.ok) {
               deletedCount++;
             }
@@ -1069,7 +1070,8 @@ export default function App() {
         }
 
         try {
-          const res = await fetch(`/api/delete/${photoId}`, { method: "POST" });
+          const activeFolderId = guestFolderId || status?.folderId;
+          const res = await fetch(`/api/delete/${photoId}${activeFolderId ? `?folderId=${activeFolderId}` : ""}`, { method: "POST" });
           const data = await res.json();
 
           if (!res.ok) {
@@ -1102,18 +1104,23 @@ export default function App() {
     return `${(b / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const getPhotoViewUrl = (photoId: string) => {
+    const activeFolderId = guestFolderId || status?.folderId;
+    return `/api/photos/view/${photoId}${activeFolderId ? `?folderId=${activeFolderId}` : ""}`;
+  };
+
   const getGridPhotoSrc = (photo: Photo) => {
     if (photo.thumbnailLink) {
       return photo.thumbnailLink.replace(/=s\d+$/, '=s600');
     }
-    return `/api/photos/view/${photo.id}`;
+    return getPhotoViewUrl(photo.id);
   };
 
   const getLightboxPhotoSrc = (photo: Photo) => {
     if (photo.thumbnailLink) {
       return photo.thumbnailLink.replace(/=s\d+$/, '=s1600');
     }
-    return `/api/photos/view/${photo.id}`;
+    return getPhotoViewUrl(photo.id);
   };
 
   const getPublicRedirectUri = () => {
@@ -2339,7 +2346,7 @@ export default function App() {
                   </button>
                 ) : (
                   <a
-                    href={`/api/photos/view/${selectedPhoto.id}`}
+                    href={getPhotoViewUrl(selectedPhoto.id)}
                     download={selectedPhoto.name}
                     target="_blank"
                     rel="noreferrer"
