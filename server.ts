@@ -483,7 +483,7 @@ app.get("/api/photos", async (req, res) => {
 
     const driveRes = await drive.files.list({
       q: `'${folderId}' in parents and trashed = false`,
-      fields: "files(id, name, mimeType, createdTime, size)",
+      fields: "files(id, name, mimeType, createdTime, size, thumbnailLink)",
       orderBy: "createdTime desc",
       pageSize: 50,
     });

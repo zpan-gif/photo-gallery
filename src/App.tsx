@@ -42,6 +42,7 @@ interface Photo {
   mimeType: string;
   createdTime: string;
   size?: string;
+  thumbnailLink?: string;
 }
 
 interface ServerStatus {
@@ -951,13 +952,26 @@ export default function App() {
         });
         setSuccessMsg(`Save request completed!`);
       } else {
-        throw new Error("Local device browser restricts sharing multiple file links. Falling back to downloading as ZIP archive.");
+        throw new Error("Local device browser restricts sharing multiple file links.");
       }
     } catch (err: any) {
       console.warn("Native phone share sheet was not opened or supported:", err);
-      // Fallback: trigger JSZip download!
-      setSuccessMsg("Save dialog unavailable or closed. Converting selection to dynamic ZIP folder...");
-      await downloadSelectedPhotosAsZip(selectedPhotos);
+      // Fallback: trigger single download or ZIP download!
+      if (selectedPhotos.length === 1) {
+        const photo = selectedPhotos[0];
+        const link = document.createElement("a");
+        link.href = `/api/photos/view/${photo.id}`;
+        link.download = photo.name;
+        link.target = "_blank";
+        link.rel = "noreferrer";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setSuccessMsg("Downloading photo...");
+      } else {
+        setSuccessMsg("Save dialog unavailable or closed. Converting selection to dynamic ZIP folder...");
+        await downloadSelectedPhotosAsZip(selectedPhotos);
+      }
     } finally {
       setBatchActionLoading(false);
       setBatchActionProgress(0);
@@ -1086,6 +1100,20 @@ export default function App() {
     if (b < 1024) return `${b} B`;
     if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
     return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const getGridPhotoSrc = (photo: Photo) => {
+    if (photo.thumbnailLink) {
+      return photo.thumbnailLink.replace(/=s\d+$/, '=s600');
+    }
+    return `/api/photos/view/${photo.id}`;
+  };
+
+  const getLightboxPhotoSrc = (photo: Photo) => {
+    if (photo.thumbnailLink) {
+      return photo.thumbnailLink.replace(/=s\d+$/, '=s1600');
+    }
+    return `/api/photos/view/${photo.id}`;
   };
 
   const getPublicRedirectUri = () => {
@@ -2120,7 +2148,7 @@ export default function App() {
                       style={{ cursor: isSelecting ? "pointer" : "zoom-in" }}
                     >
                       <img
-                        src={`/api/photos/view/${photo.id}`}
+                        src={getGridPhotoSrc(photo)}
                         alt={photo.name}
                         loading="lazy"
                         referrerPolicy="no-referrer"
@@ -2247,7 +2275,7 @@ export default function App() {
               {/* Main Image Viewport with full-stack safe referral */}
               <div className="flex-1 max-h-[70vh] flex items-center justify-center relative rounded-3xl overflow-hidden px-4">
                 <img
-                  src={`/api/photos/view/${selectedPhoto.id}`}
+                  src={getLightboxPhotoSrc(selectedPhoto)}
                   alt={selectedPhoto.name}
                   referrerPolicy="no-referrer"
                   className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50"
@@ -2300,17 +2328,28 @@ export default function App() {
                   </button>
                 )}
                 
-                <a
-                  href={`/api/photos/view/${selectedPhoto.id}`}
-                  download={selectedPhoto.name}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-850 text-white font-bold text-xs rounded-full shadow-xs transition-all"
-                  id="lightbox_download_link"
-                >
-                  <span className="md:hidden">Save Image</span>
-                  <span className="hidden md:inline">Download</span>
-                </a>
+                {typeof navigator !== "undefined" && navigator.share ? (
+                  <button
+                    onClick={() => shareSelectedPhotosToPhone([selectedPhoto])}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-850 text-white font-bold text-xs rounded-full shadow-xs transition-all cursor-pointer"
+                    id="lightbox_share_button"
+                  >
+                    <span className="md:hidden">Save Image</span>
+                    <span className="hidden md:inline">Save / Share</span>
+                  </button>
+                ) : (
+                  <a
+                    href={`/api/photos/view/${selectedPhoto.id}`}
+                    download={selectedPhoto.name}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-850 text-white font-bold text-xs rounded-full shadow-xs transition-all"
+                    id="lightbox_download_link"
+                  >
+                    <span className="md:hidden">Save Image</span>
+                    <span className="hidden md:inline">Download</span>
+                  </a>
+                )}
               </div>
 
               <div className="text-[10px] text-slate-400 font-mono text-center">
