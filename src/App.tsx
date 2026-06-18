@@ -2428,7 +2428,8 @@ export default function App() {
                 title="Save photos directly to iOS / Android Camera Roll"
               >
                 <CheckCircle className="h-3.5 w-3.5 text-emerald-400" strokeWidth={3} />
-                <span>Save to Phone</span>
+                <span className="md:hidden">Save to Phone</span>
+                <span className="hidden md:inline">Download</span>
               </button>
             </div>
           </motion.div>
