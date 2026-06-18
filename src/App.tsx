@@ -1351,27 +1351,12 @@ export default function App() {
                     <ChevronRight className="h-3 w-3 shrink-0" />
                   </button>
                 )}
-                
+
                 {status?.connected && (
-                  <>
-                    <span className="text-[10.5px] sm:text-[11px] font-semibold text-emerald-850 dark:text-emerald-450 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100/60 dark:border-emerald-900 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                      <span><span className="hidden xs:inline">Drive </span>Connected</span>
-                    </span>
-                    
-                    <button
-                      onClick={() => setShowAdminGuide(!showAdminGuide)}
-                      className={`text-[11px] sm:text-xs font-bold px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-full transition-all flex items-center gap-1 sm:gap-1.5 ${
-                        showAdminGuide 
-                          ? "bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900" 
-                          : "bg-slate-100 dark:bg-slate-900 text-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800"
-                      }`}
-                      id="toggle_settings_button"
-                    >
-                      <Settings className="h-3.5 w-3.5 shrink-0" />
-                      <span>{showAdminGuide ? "Close" : "Settings"}</span>
-                    </button>
-                  </>
+                  <span className="text-[10.5px] sm:text-[11px] font-semibold text-emerald-850 dark:text-emerald-450 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100/60 dark:border-emerald-900 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span><span className="hidden xs:inline">Drive </span>Connected</span>
+                  </span>
                 )}
               </div>
             </>
@@ -1428,7 +1413,7 @@ export default function App() {
 
       {/* COLLAPSIBLE DRIVE AND FOLDERS SECTOR - CHOOSE WHICH FOLDER */}
       <AnimatePresence>
-        {!guestFolderId && status?.connected && showAdminGuide && (
+        {!guestFolderId && status?.connected && (
           <motion.section
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
@@ -1447,12 +1432,6 @@ export default function App() {
                   </h3>
                   <p className="text-xs text-slate-400 mt-1 font-sans">Pick which directory your guests' uploaded photos will be saved to.</p>
                 </div>
-                <button 
-                  onClick={() => setShowAdminGuide(false)}
-                  className="text-slate-400 hover:text-slate-800 p-2 hover:bg-slate-100 rounded-full transition-colors"
-                >
-                  <X className="h-4 w-4" />
-                </button>
               </div>
 
               {/* Status and Authenticate option */}
