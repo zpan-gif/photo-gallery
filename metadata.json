@@ -1,6 +1,0 @@
-{
-  "name": "Public Drive Gallery",
-  "description": "Allows public guests to upload photos directly to a connected Google Drive owner's folder and view a public gallery without logging in.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
