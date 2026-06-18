@@ -418,7 +418,7 @@ export default function App() {
     // Listen to OAUTH popup postMessage events to support elegant in-context integration
     const handleOAuthMessage = (event: MessageEvent) => {
       const origin = event.origin;
-      if (!origin.endsWith(".run.app") && !origin.includes("localhost") && !origin.includes("127.0.0.1")) {
+      if (!origin.endsWith(".run.app") && !origin.endsWith(".onrender.com") && !origin.includes("localhost") && !origin.includes("127.0.0.1")) {
         return;
       }
       
