@@ -2329,7 +2329,8 @@ export default function App() {
                   className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-850 text-white font-bold text-xs rounded-full shadow-xs transition-all"
                   id="lightbox_download_link"
                 >
-                  <span>Open Full Definition</span>
+                  <span className="md:hidden">Save Image</span>
+                  <span className="hidden md:inline">Download</span>
                 </a>
               </div>
 
