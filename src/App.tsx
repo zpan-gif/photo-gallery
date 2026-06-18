@@ -1983,7 +1983,7 @@ export default function App() {
                 >
                   <div className="flex flex-col items-center gap-4">
                     {/* Centered Big QR Code */}
-                    <div className="bg-white p-4.5 rounded-2xl border border-slate-200/60 flex items-center justify-center shadow-md relative group">
+                    <div id="owner_guest_share_qr" className="bg-white p-4.5 rounded-2xl border border-slate-200/60 flex items-center justify-center shadow-md relative group">
                       <QRCodeSVG 
                         value={getPublicGuestUrl(status.folderId!)}
                         size={140}
@@ -2641,87 +2641,7 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* ── STICKY MOBILE UPLOAD BAR ────────────────────────────────── */}
-      {/* Only shown on mobile (sm:hidden), only when in guest mode or connected, not while uploading/selecting */}
-      {((guestFolderId) || (status?.connected && status?.folderId)) && !isSelecting && (
-        <AnimatePresence>
-          {!uploadSuccessModal.isOpen && !selectedPhoto && (
-            <motion.div
-              key="sticky-upload-bar"
-              initial={{ y: 80, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              exit={{ y: 80, opacity: 0 }}
-              transition={{ type: "spring", damping: 22, stiffness: 300 }}
-              className="fixed bottom-0 left-0 right-0 z-30 sm:hidden"
-              id="sticky_mobile_upload_bar"
-            >
-              {/* Upload progress micro-bar */}
-              {uploading && (
-                <div className="w-full h-1 bg-slate-250 dark:bg-slate-800">
-                  <motion.div
-                    className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full"
-                    style={{ width: `${uploadProgress}%` }}
-                    transition={{ duration: 0.3 }}
-                  />
-                </div>
-              )}
 
-              <div className="bg-white/95 dark:bg-slate-950/95 backdrop-blur-md border-t border-slate-200/80 dark:border-slate-900/60 px-4 pt-3 pb-6 flex items-center gap-3 shadow-[0_-8px_30px_rgba(0,0,0,0.08)] dark:shadow-none">
-                {/* Photo count pill */}
-                {photos.length > 0 && (
-                  <div className="flex-1 flex items-center gap-2 min-w-0">
-                    <div className="flex -space-x-2">
-                      {photos.slice(0, 3).map((photo) => (
-                        <div
-                          key={photo.id}
-                          className="h-8 w-8 rounded-full overflow-hidden border-2 border-white dark:border-slate-950 shadow-sm bg-slate-100 dark:bg-slate-900 shrink-0"
-                        >
-                          <img
-                            src={getGridPhotoSrc(photo)}
-                            alt={photo.name}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-                      ))}
-                    </div>
-                    <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-350 truncate">
-                      {photos.length} photo{photos.length !== 1 ? "s" : ""} shared
-                    </span>
-                  </div>
-                )}
-                {photos.length === 0 && (
-                  <p className="text-xs text-slate-450 dark:text-slate-500 flex-1">Be the first to drop a photo!</p>
-                )}
-
-                {/* Big Upload CTA */}
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
-                  className={`flex items-center gap-2 px-5 py-3 rounded-2xl font-bold text-sm transition-all cursor-pointer shrink-0 shadow-sm ${
-                    uploading
-                      ? "bg-slate-100 dark:bg-slate-900 text-slate-400 dark:text-slate-600"
-                      : "bg-slate-900 dark:bg-white hover:bg-slate-800 dark:hover:bg-slate-100 active:scale-[0.97] text-white dark:text-slate-950 shadow-slate-900/20"
-                  }`}
-                  id="sticky_mobile_upload_button"
-                >
-                  {uploading ? (
-                    <>
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                      <span>Uploading...</span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="text-base">📷</span>
-                      <span>Add Photos</span>
-                    </>
-                  )}
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      )}
 
       {/* Floating Batch Actions iOS Drawer */}
       <AnimatePresence>
