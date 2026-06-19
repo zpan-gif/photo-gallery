@@ -246,6 +246,16 @@ export default function App() {
   const [batchActionLabel, setBatchActionLabel] = useState("");
   const [batchActionProgress, setBatchActionProgress] = useState(0);
 
+  // Dynamic Upload tracking states
+  const [uploadFileName, setUploadFileName] = useState<string>("");
+  const [uploadIndex, setUploadIndex] = useState<number>(0);
+  const [uploadTotal, setUploadTotal] = useState<number>(0);
+  const [uploadTimeRemaining, setUploadTimeRemaining] = useState<string>("");
+  const [uploadTotalSize, setUploadTotalSize] = useState<number>(0);
+  const [completedBytes, setCompletedBytes] = useState<number>(0);
+  const [uploadStartTime, setUploadStartTime] = useState<number | null>(null);
+  const [uploadFileSizes, setUploadFileSizes] = useState<number[]>([]);
+
   // Custom IFrame-Safe Confirmation Modal State
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
@@ -455,6 +465,61 @@ export default function App() {
       window.removeEventListener("message", handleOAuthMessage);
     };
   }, []);
+
+  // Dynamic progress and ETC updater
+  useEffect(() => {
+    if (!uploading || !uploadStartTime || uploadTotalSize === 0) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const elapsedSeconds = (now - uploadStartTime) / 1000;
+
+      // Speed in bytes/sec. Use actual speed if we have uploaded at least some bytes,
+      // otherwise default to a reasonable 1.2 MB/s.
+      let speed = 1200000; // 1.2 MB/s default
+      if (completedBytes > 0 && elapsedSeconds > 0.5) {
+        speed = completedBytes / elapsedSeconds;
+      }
+      
+      // Ensure speed is sensible (min 100 KB/s, max 50 MB/s to prevent crazy estimates)
+      speed = Math.max(100000, Math.min(50000000, speed));
+
+      // Calculate remaining bytes and remaining seconds
+      const remainingBytes = Math.max(0, uploadTotalSize - completedBytes);
+      const remainingSeconds = remainingBytes / speed;
+
+      // Update progress bar
+      // Since a file is currently uploading, we can simulate its progress up to 90% of its size
+      const currentFileIndex = Math.min(uploadIndex, uploadFileSizes.length - 1);
+      const currentFileSize = uploadFileSizes[currentFileIndex] || 0;
+      
+      // We can estimate how much of the current file is done by looking at how long it has been uploading.
+      // If we assume previous files took time proportional to their sizes:
+      const previousFilesSize = uploadFileSizes.slice(0, currentFileIndex).reduce((acc, s) => acc + s, 0);
+      const timeSpentOnPreviousFiles = previousFilesSize / speed;
+      const timeSpentOnCurrentFile = Math.max(0, elapsedSeconds - timeSpentOnPreviousFiles);
+      const simulatedActiveUploaded = Math.min(currentFileSize * 0.9, speed * timeSpentOnCurrentFile);
+      
+      const totalSimulatedUploaded = Math.min(uploadTotalSize - 1, completedBytes + simulatedActiveUploaded);
+      
+      const pct = Math.min(99, Math.round((totalSimulatedUploaded / uploadTotalSize) * 100));
+      setUploadProgress(pct);
+
+      if (remainingSeconds < 2) {
+        setUploadTimeRemaining("Finishing up...");
+      } else if (remainingSeconds < 60) {
+        setUploadTimeRemaining(`~${Math.round(remainingSeconds)}s remaining`);
+      } else {
+        const mins = Math.floor(remainingSeconds / 60);
+        const secs = Math.round(remainingSeconds % 60);
+        setUploadTimeRemaining(`~${mins}m ${secs}s remaining`);
+      }
+    }, 300);
+
+    return () => clearInterval(interval);
+  }, [uploading, uploadStartTime, uploadTotalSize, completedBytes, uploadIndex, uploadFileSizes]);
 
   // Sync folders list whenever setup drawer toggles open OR when folder is missing on active connection
   useEffect(() => {
@@ -770,6 +835,17 @@ export default function App() {
     setErrorMsg(null);
     setUploadProgress(5);
 
+    // Initialize upload tracking states
+    const totalSize = validFiles.reduce((acc, f) => acc + f.size, 0);
+    setUploadTotal(validFiles.length);
+    setUploadIndex(0);
+    setUploadFileName(validFiles[0].name);
+    setUploadTotalSize(totalSize);
+    setCompletedBytes(0);
+    setUploadStartTime(Date.now());
+    setUploadFileSizes(validFiles.map(f => f.size));
+    setUploadTimeRemaining("Calculating...");
+
     // Create local object URLs for preview thumbnails before uploading
     const previewItems = validFiles.map(f => ({
       name: f.name,
@@ -786,6 +862,8 @@ export default function App() {
       
       for (let idx = 0; idx < validFiles.length; idx++) {
         const file = validFiles[idx];
+        setUploadIndex(idx);
+        setUploadFileName(file.name);
         const objectUrl = previewItems[idx].objectUrl;
         const newPhoto: Photo = {
           id: objectUrl,
@@ -796,12 +874,16 @@ export default function App() {
         };
         newSimulatedPhotos.push(newPhoto);
         
+        // Artificial delay for visual simulation of uploading
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
         setMyUploads((prev) => {
           const updated = [...prev, objectUrl];
           localStorage.setItem("public_drive_gallery_uploads", JSON.stringify(updated));
           return updated;
         });
         uploadedCount++;
+        setCompletedBytes(prev => prev + file.size);
       }
       
       const updatedPhotos = [...newSimulatedPhotos, ...currentStored];
@@ -827,8 +909,8 @@ export default function App() {
 
     for (let i = 0; i < total; i++) {
       const file = validFiles[i];
-      const percentDoneBefore = Math.round((i / total) * 100);
-      setUploadProgress(percentDoneBefore || 5);
+      setUploadIndex(i);
+      setUploadFileName(file.name);
       setSuccessMsg(`Uploading "${file.name}" (${i + 1} of ${total})...`);
 
       const formData = new FormData();
@@ -857,9 +939,11 @@ export default function App() {
         });
 
         uploadedCount++;
+        setCompletedBytes(prev => prev + file.size);
       } catch (err: any) {
         console.error("Batch element upload failed:", err);
         setErrorMsg(err.message || "Failed to upload file.");
+        setCompletedBytes(prev => prev + file.size);
       }
     }
 
@@ -2757,6 +2841,52 @@ export default function App() {
         </div>
       )}
 
+      {/* Guest & Host Upload Overlay */}
+      {uploading && (
+        <div className="fixed inset-0 z-55 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-fade-in">
+          <div className="bg-slate-900/90 border border-slate-800/80 shadow-2xl rounded-3xl p-8 max-w-sm w-full text-center space-y-6 text-white">
+            {/* Spinning Rotating Circle */}
+            <div className="relative h-20 w-20 mx-auto flex items-center justify-center">
+              {/* Outer rotating ring */}
+              <div className="absolute inset-0 rounded-full border-4 border-slate-800 border-t-indigo-500 animate-spin"></div>
+              {/* Inner glowing icon */}
+              <div className="h-12 w-12 rounded-full bg-indigo-500/10 flex items-center justify-center">
+                <Upload className="h-6 w-6 text-indigo-400 animate-pulse" />
+              </div>
+            </div>
+            
+            <div className="space-y-2">
+              <h3 className="font-extrabold text-lg tracking-tight">Uploading Media</h3>
+              <p className="text-xs text-slate-400 font-medium truncate max-w-xs mx-auto">
+                {uploadFileName || "Preparing files..."}
+              </p>
+              <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-wider font-mono">
+                File {uploadIndex + 1} of {uploadTotal}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              {/* Progress bar */}
+              <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                <div 
+                  className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all duration-300 ease-out" 
+                  style={{ width: `${uploadProgress}%` }}
+                ></div>
+              </div>
+              
+              <div className="flex justify-between items-center text-xs font-mono font-bold text-slate-400">
+                <span>{uploadProgress}%</span>
+                <span className="text-indigo-400">{uploadTimeRemaining || "Calculating time..."}</span>
+              </div>
+            </div>
+
+            <p className="text-[10px] text-slate-500 leading-normal">
+              Keep this window open until upload completes to prevent connection issues.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Dynamic Custom IFrame-Safe Confirmation Modal */}
       <AnimatePresence>
         {confirmDialog.isOpen && (
@@ -3008,8 +3138,8 @@ export default function App() {
         </footer>
       )}
 
-      {/* FLOATING ADD PHOTOS BUTTON FOR GUESTS AND OWNERS */}
-      {(guestFolderId || (status?.connected && status?.folderId)) && (
+      {/* FLOATING ADD PHOTOS BUTTON FOR GUESTS ONLY */}
+      {guestFolderId && (
         <div className="fixed bottom-6 right-6 z-35 md:bottom-8 md:right-8">
           <button
             onClick={() => fileInputRef.current?.click()}
