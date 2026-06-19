@@ -1747,7 +1747,7 @@ export default function App() {
                   initial={{ opacity: 0, y: 30 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: 0.6 }}
-                  className="absolute bottom-0 left-0 right-0 pb-8 px-6 pointer-events-none"
+                  className="absolute bottom-0 left-0 right-0 pb-8 px-6 pointer-events-none hidden sm:block"
                 >
                   <div className="flex justify-center gap-2 overflow-hidden">
                     {photos.slice(0, 7).map((photo, idx) => (
