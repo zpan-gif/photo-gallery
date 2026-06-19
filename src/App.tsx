@@ -122,6 +122,70 @@ const DEMO_PHOTOS: Photo[] = [
   }
 ];
 
+// Client-side canvas-based image compression helper
+const compressImage = (file: File, maxWidth = 2048, maxHeight = 2048, quality = 0.8): Promise<Blob | File> => {
+  return new Promise((resolve) => {
+    // If not an image, or is an animated GIF, bypass compression
+    if (!file.type.startsWith("image/") || file.type === "image/gif") {
+      resolve(file);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+
+        // Calculate new dimensions keeping aspect ratio
+        if (width > height) {
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+        } else {
+          if (height > maxHeight) {
+            width = Math.round((width * maxHeight) / height);
+            height = maxHeight;
+          }
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(file);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Keep transparent PNGs as PNG (canvas.toBlob doesn't support quality for PNG but resizing still compresses size)
+        // Convert HEIC and other types to JPEG
+        const outputType = file.type === "image/png" ? "image/png" : "image/jpeg";
+
+        canvas.toBlob(
+          (blob) => {
+            if (blob) {
+              resolve(blob);
+            } else {
+              resolve(file);
+            }
+          },
+          outputType,
+          outputType === "image/jpeg" ? quality : undefined
+        );
+      };
+      img.onerror = () => resolve(file);
+    };
+    reader.onerror = () => resolve(file);
+  });
+};
+
 export default function App() {
   const isSandbox = false;
   const [status, setStatus] = useState<ServerStatus | null>(null);
@@ -835,22 +899,41 @@ export default function App() {
     setErrorMsg(null);
     setUploadProgress(5);
 
-    // Initialize upload tracking states
-    const totalSize = validFiles.reduce((acc, f) => acc + f.size, 0);
+    // Dynamic UI initializations
     setUploadTotal(validFiles.length);
     setUploadIndex(0);
     setUploadFileName(validFiles[0].name);
+    setUploadTimeRemaining("Compressing...");
+
+    // Compress all files first
+    const compressedBlobs: Blob[] = [];
+    const compressedSizes: number[] = [];
+    for (let idx = 0; idx < validFiles.length; idx++) {
+      const file = validFiles[idx];
+      setUploadFileName(`Compressing "${file.name}"...`);
+      try {
+        const compressedBlob = await compressImage(file);
+        compressedBlobs.push(compressedBlob);
+        compressedSizes.push(compressedBlob.size);
+      } catch (err) {
+        console.error("Compression failed, using original file:", err);
+        compressedBlobs.push(file);
+        compressedSizes.push(file.size);
+      }
+    }
+
+    const totalSize = compressedSizes.reduce((acc, s) => acc + s, 0);
     setUploadTotalSize(totalSize);
     setCompletedBytes(0);
     setUploadStartTime(Date.now());
-    setUploadFileSizes(validFiles.map(f => f.size));
+    setUploadFileSizes(compressedSizes);
     setUploadTimeRemaining("Calculating...");
 
     // Create local object URLs for preview thumbnails before uploading
-    const previewItems = validFiles.map(f => ({
+    const previewItems = validFiles.map((f, idx) => ({
       name: f.name,
-      objectUrl: URL.createObjectURL(f),
-      size: String(f.size),
+      objectUrl: URL.createObjectURL(compressedBlobs[idx]),
+      size: String(compressedSizes[idx]),
     }));
 
     if (isSandbox) {
@@ -868,9 +951,9 @@ export default function App() {
         const newPhoto: Photo = {
           id: objectUrl,
           name: file.name,
-          mimeType: file.type,
+          mimeType: file.type === "image/png" ? "image/png" : "image/jpeg",
           createdTime: new Date().toISOString(),
-          size: String(file.size)
+          size: String(compressedSizes[idx])
         };
         newSimulatedPhotos.push(newPhoto);
         
@@ -883,7 +966,7 @@ export default function App() {
           return updated;
         });
         uploadedCount++;
-        setCompletedBytes(prev => prev + file.size);
+        setCompletedBytes(prev => prev + compressedSizes[idx]);
       }
       
       const updatedPhotos = [...newSimulatedPhotos, ...currentStored];
@@ -909,12 +992,14 @@ export default function App() {
 
     for (let i = 0; i < total; i++) {
       const file = validFiles[i];
+      const blob = compressedBlobs[i];
       setUploadIndex(i);
       setUploadFileName(file.name);
       setSuccessMsg(`Uploading "${file.name}" (${i + 1} of ${total})...`);
 
       const formData = new FormData();
-      formData.append("photo", file);
+      const cleanName = file.name.replace(/\.[^/.]+$/, "") + (file.type === "image/png" ? ".png" : ".jpg");
+      formData.append("photo", blob, cleanName);
       if (guestFolderId) {
         formData.append("folderId", guestFolderId);
       }
@@ -939,11 +1024,11 @@ export default function App() {
         });
 
         uploadedCount++;
-        setCompletedBytes(prev => prev + file.size);
+        setCompletedBytes(prev => prev + compressedSizes[i]);
       } catch (err: any) {
         console.error("Batch element upload failed:", err);
         setErrorMsg(err.message || "Failed to upload file.");
-        setCompletedBytes(prev => prev + file.size);
+        setCompletedBytes(prev => prev + compressedSizes[i]);
       }
     }
 
