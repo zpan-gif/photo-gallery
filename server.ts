@@ -165,6 +165,11 @@ function getAuthorizedDriveClient(creds: SavedCredentials) {
 // Configure multer to save uploads to the OS temp directory
 const upload = multer({ dest: os.tmpdir() });
 
+// Lightweight health check endpoint for keep-alive monitoring
+app.get("/ping", (req, res) => {
+  res.status(200).send("OK");
+});
+
 // 1. App Connection & Auth Status Endpoint
 app.get("/api/status", async (req, res) => {
   const sessionId = (req as any).sessionId;
