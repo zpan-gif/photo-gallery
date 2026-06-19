@@ -248,11 +248,27 @@ export default function App() {
 
   // Iframe preview / embed detection states
   const [isInIframe, setIsInIframe] = useState(false);
+  const [showInAppBanner, setShowInAppBanner] = useState(false);
 
   useEffect(() => {
     // Detect if running inside an iframe (like standard AI Studio preview wrappers)
     const isIframe = window.self !== window.top;
     setIsInIframe(isIframe);
+
+    // Detect if running inside restricted in-app browsers
+    const ua = navigator.userAgent || navigator.vendor || (window as any).opera || "";
+    const isRestricted = (
+      ua.indexOf("FBAN") > -1 ||
+      ua.indexOf("FBAV") > -1 ||
+      ua.indexOf("Instagram") > -1 ||
+      ua.indexOf("LINE") > -1 ||
+      ua.indexOf("Snapchat") > -1 ||
+      ua.indexOf("Twitter") > -1 ||
+      ua.indexOf("LinkedInApp") > -1 ||
+      ua.indexOf("Slack") > -1 ||
+      ua.indexOf("MicroMessenger") > -1
+    );
+    setShowInAppBanner(isRestricted);
   }, []);
 
   const handleCopyAppUrl = async () => {
@@ -1882,6 +1898,27 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0b0f19] text-slate-950 dark:text-slate-100 font-sans antialiased selection:bg-slate-900 dark:selection:bg-indigo-600 selection:text-white transition-colors duration-200" id="main_app_layout">
       
+      {/* IN-APP BROWSER DETECTOR BANNER */}
+      {showInAppBanner && (
+        <div className="bg-amber-500 text-slate-950 px-4 py-3 text-xs font-bold flex items-center justify-between gap-3 shadow-md relative z-55">
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-slate-900 animate-pulse" />
+            <span className="truncate">
+              {/iPhone|iPad|iPod/i.test(navigator.userAgent)
+                ? 'In-App Browser detected. Tap the "..." or share icon in the corner and select "Open in Safari" to download photos.'
+                : 'In-App Browser detected. Tap the menu in the corner and select "Open in Chrome" to download photos.'}
+            </span>
+          </div>
+          <button
+            onClick={() => setShowInAppBanner(false)}
+            className="text-slate-900 hover:text-black p-1 hover:bg-black/10 rounded-full transition-colors cursor-pointer shrink-0"
+            title="Dismiss banner"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* ── GUEST HERO LANDING (full-screen, z-40) ──────────────────── */}
       {guestFolderId && renderGuestHeroLanding()}
 
