@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build artifacts (built inside Docker, not needed from host)
+dist/
+
+# Secrets — inject these at runtime via environment variables, not baked into the image
+.env
+.env.*
+firebase-service-account.json
+drive-credentials.json
+
+# Version control
+.git
+.gitignore
+
+# Editor & OS junk
+.DS_Store
+*.log
+*.md
+
+# Docker files themselves
+Dockerfile
+.dockerignore

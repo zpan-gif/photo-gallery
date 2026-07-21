@@ -1,17 +1,18 @@
 import React, { useState, useEffect, useRef } from "react";
 import JSZip from "jszip";
-import { 
-  Upload, 
-  Trash2, 
-  Settings, 
-  AlertCircle, 
-  CheckCircle, 
-  RefreshCw, 
-  Lock, 
+import {
+  Upload,
+  Trash2,
+  Settings,
+  AlertCircle,
+  CheckCircle,
+  RefreshCw,
+  Lock,
   FolderOpen,
   X,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Plus,
   Search,
   SlidersHorizontal,
@@ -194,11 +195,11 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [dragActive, setDragActive] = useState(false);
-  
+
   // Notification States
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  
+
   // Guest view and Link isolation properties
   const [guestFolderId, setGuestFolderId] = useState<string | null>(() => {
     const params = new URLSearchParams(window.location.search);
@@ -234,6 +235,7 @@ export default function App() {
 
   // Administrative Setup states
   const [showAdminGuide, setShowAdminGuide] = useState(false);
+  const [showFolderDropdown, setShowFolderDropdown] = useState(false);
   const [forceSelectFolderState, setForceSelectFolderState] = useState(false);
   const useFullScope = false;
   const [isLimitedScope, setIsLimitedScope] = useState(false);
@@ -336,6 +338,13 @@ export default function App() {
   const [uploadStartTime, setUploadStartTime] = useState<number | null>(null);
   const [uploadFileSizes, setUploadFileSizes] = useState<number[]>([]);
 
+  // Guest name feature states
+  const [allowGuestNames, setAllowGuestNames] = useState<boolean>(false);
+  const [guestName, setGuestName] = useState<string>(() => sessionStorage.getItem("guest_uploader_name") || "");
+  const [showNamePrompt, setShowNamePrompt] = useState<boolean>(false);
+  const [namePromptInput, setNamePromptInput] = useState<string>("");
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+
   // Custom IFrame-Safe Confirmation Modal State
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
@@ -377,6 +386,19 @@ export default function App() {
         }
       } else {
         setPhotos([]);
+      }
+      // Fetch gallery settings (allowGuestNames) based on active folder
+      const settingsFolderId = guestFolderId || statusData.folderId;
+      if (settingsFolderId) {
+        try {
+          const settingsRes = await fetch(`/api/settings?folderId=${settingsFolderId}`);
+          if (settingsRes.ok) {
+            const settingsData = await settingsRes.json();
+            setAllowGuestNames(!!settingsData.allowGuestNames);
+          }
+        } catch (e) {
+          console.error("Failed to fetch settings:", e);
+        }
       }
     } catch (err: any) {
       console.error(err);
@@ -473,7 +495,7 @@ export default function App() {
           context.fillStyle = "#ffffff";
           context.fillRect(0, 0, ctxWidth, ctxHeight);
           context.drawImage(image, 30, 30, ctxWidth - 60, ctxHeight - 60);
-          
+
           const png = canvas.toDataURL("image/png");
           const downloadLink = document.createElement("a");
           downloadLink.href = png;
@@ -512,7 +534,7 @@ export default function App() {
       if (nextParams.has("status")) { nextParams.delete("status"); changed = true; }
       if (nextParams.has("error")) { nextParams.delete("error"); changed = true; }
       if (nextParams.has("msg")) { nextParams.delete("msg"); changed = true; }
-      
+
       if (changed) {
         const newSearch = nextParams.toString();
         const newPath = window.location.pathname + (newSearch ? `?${newSearch}` : "");
@@ -528,7 +550,7 @@ export default function App() {
       if (!origin.endsWith(".run.app") && !origin.endsWith(".onrender.com") && !origin.includes("localhost") && !origin.includes("127.0.0.1")) {
         return;
       }
-      
+
       if (event.data?.type === "OAUTH_AUTH_SUCCESS") {
         setSuccessMsg("Connected! Choose any destination folder from your Google Drive inside the setup menu.");
         setShowAdminGuide(true);
@@ -562,7 +584,7 @@ export default function App() {
       if (completedBytes > 0 && elapsedSeconds > 0.5) {
         speed = completedBytes / elapsedSeconds;
       }
-      
+
       // Ensure speed is sensible (min 100 KB/s, max 50 MB/s to prevent crazy estimates)
       speed = Math.max(100000, Math.min(50000000, speed));
 
@@ -574,16 +596,16 @@ export default function App() {
       // Since a file is currently uploading, we can simulate its progress up to 90% of its size
       const currentFileIndex = Math.min(uploadIndex, uploadFileSizes.length - 1);
       const currentFileSize = uploadFileSizes[currentFileIndex] || 0;
-      
+
       // We can estimate how much of the current file is done by looking at how long it has been uploading.
       // If we assume previous files took time proportional to their sizes:
       const previousFilesSize = uploadFileSizes.slice(0, currentFileIndex).reduce((acc, s) => acc + s, 0);
       const timeSpentOnPreviousFiles = previousFilesSize / speed;
       const timeSpentOnCurrentFile = Math.max(0, elapsedSeconds - timeSpentOnPreviousFiles);
       const simulatedActiveUploaded = Math.min(currentFileSize * 0.9, speed * timeSpentOnCurrentFile);
-      
+
       const totalSimulatedUploaded = Math.min(uploadTotalSize - 1, completedBytes + simulatedActiveUploaded);
-      
+
       const pct = Math.min(99, Math.round((totalSimulatedUploaded / uploadTotalSize) * 100));
       setUploadProgress(pct);
 
@@ -656,7 +678,7 @@ export default function App() {
           throw new Error(errData.error || "Failed setup");
         }
         const data = await res.json();
-        
+
         if (authWindow && !authWindow.closed) {
           authWindow.location.href = data.url;
         } else {
@@ -664,7 +686,7 @@ export default function App() {
         }
       } catch (err: any) {
         if (authWindow) {
-          try { authWindow.close(); } catch (e) {}
+          try { authWindow.close(); } catch (e) { }
         }
         setErrorMsg(err.message || "Failed to trigger Google authentication process.");
       }
@@ -722,7 +744,7 @@ export default function App() {
         throw new Error(errData.error || "Failed setup");
       }
       const data = await res.json();
-      
+
       if (authWindow && !authWindow.closed) {
         authWindow.location.href = data.url;
       } else {
@@ -730,7 +752,7 @@ export default function App() {
       }
     } catch (err: any) {
       if (authWindow) {
-        try { authWindow.close(); } catch (e) {}
+        try { authWindow.close(); } catch (e) { }
       }
       setErrorMsg(err.message || "Failed to trigger Google authentication process.");
     }
@@ -772,6 +794,7 @@ export default function App() {
       setGuestFolderName(folderName);
       setStatus(prev => prev ? { ...prev, folderId, folderName } : null);
       setForceSelectFolderState(false);
+      setShowAdminGuide(true);
       return;
     }
 
@@ -787,6 +810,7 @@ export default function App() {
         sessionStorage.setItem("photo_deck_folder_clicked", "true");
         setHasClickedFolder(true);
         setForceSelectFolderState(false);
+        setShowAdminGuide(true);
         // Refresh status and photos instantly
         setLoadingPhotos(true);
         fetchStatusAndPhotos();
@@ -829,6 +853,7 @@ export default function App() {
         sessionStorage.setItem("photo_deck_folder_clicked", "true");
         setHasClickedFolder(true);
         setForceSelectFolderState(false);
+        setShowAdminGuide(true);
         setLoadingPhotos(true);
         fetchStatusAndPhotos();
         fetchFoldersList();
@@ -846,7 +871,15 @@ export default function App() {
     if (e.target.files && e.target.files.length > 0) {
       // Dismiss guest hero when user picks files — transition to gallery
       if (guestFolderId) dismissGuestHero();
-      uploadFiles(Array.from(e.target.files));
+      const files: File[] = Array.from(e.target.files);
+      // If guest names are enabled and we don't have a name yet, collect it first
+      if (guestFolderId && allowGuestNames && !guestName) {
+        setPendingFiles(files);
+        setNamePromptInput("");
+        setShowNamePrompt(true);
+      } else {
+        uploadFiles(files);
+      }
     }
   };
 
@@ -881,7 +914,14 @@ export default function App() {
 
     const canUpload = (status?.connected && status?.folderId) || guestFolderId;
     if (canUpload && !uploading && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      uploadFiles(Array.from(e.dataTransfer.files));
+      const files: File[] = Array.from(e.dataTransfer.files);
+      if (guestFolderId && allowGuestNames && !guestName) {
+        setPendingFiles(files);
+        setNamePromptInput("");
+        setShowNamePrompt(true);
+      } else {
+        uploadFiles(files);
+      }
     }
   };
 
@@ -896,7 +936,7 @@ export default function App() {
     };
   }, [status, uploading, guestFolderId]);
 
-  const uploadFiles = async (files: File[]) => {
+  const uploadFiles = async (files: File[], nameOverride?: string) => {
     const validFiles = files.filter(file => {
       if (!file.type.startsWith("image/")) {
         setErrorMsg(`Skipped "${file.name}": Must be an image file.`);
@@ -955,10 +995,10 @@ export default function App() {
     if (isSandbox) {
       let uploadedCount = 0;
       await new Promise(resolve => setTimeout(resolve, 800)); // Mimic networking latency
-      
+
       const newSimulatedPhotos: Photo[] = [];
       const currentStored = JSON.parse(localStorage.getItem("sandbox_photos") || "null") || DEMO_PHOTOS;
-      
+
       for (let idx = 0; idx < validFiles.length; idx++) {
         const file = validFiles[idx];
         setUploadIndex(idx);
@@ -972,10 +1012,10 @@ export default function App() {
           size: String(compressedSizes[idx])
         };
         newSimulatedPhotos.push(newPhoto);
-        
+
         // Artificial delay for visual simulation of uploading
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
+
         setMyUploads((prev) => {
           const updated = [...prev, objectUrl];
           localStorage.setItem("public_drive_gallery_uploads", JSON.stringify(updated));
@@ -984,11 +1024,11 @@ export default function App() {
         uploadedCount++;
         setCompletedBytes(prev => prev + compressedSizes[idx]);
       }
-      
+
       const updatedPhotos = [...newSimulatedPhotos, ...currentStored];
       setPhotos(updatedPhotos);
       localStorage.setItem("sandbox_photos", JSON.stringify(updatedPhotos));
-      
+
       setUploadProgress(100);
       setTimeout(() => {
         setUploading(false);
@@ -1018,6 +1058,11 @@ export default function App() {
       formData.append("photo", blob, cleanName);
       if (guestFolderId) {
         formData.append("folderId", guestFolderId);
+      }
+      // Pass the guest's name if they provided one (nameOverride is used when called right after the modal, before React state updates)
+      const activeUploaderName = nameOverride !== undefined ? nameOverride : guestName;
+      if (activeUploaderName) {
+        formData.append("uploaderName", activeUploaderName);
       }
 
       try {
@@ -1115,8 +1160,8 @@ export default function App() {
 
       const link = document.createElement("a");
       link.href = URL.createObjectURL(content);
-      link.download = guestFolderId 
-        ? `${guestFolderName || "Shared_Gallery"}_photos.zip` 
+      link.download = guestFolderId
+        ? `${guestFolderName || "Shared_Gallery"}_photos.zip`
         : `${status?.folderName || "PhotoDock"}_photos.zip`;
       document.body.appendChild(link);
       link.click();
@@ -1304,7 +1349,7 @@ export default function App() {
           }
 
           setPhotos((prev) => prev.filter((p) => p.id !== photoId));
-          
+
           const updatedUploads = myUploads.filter((id) => id !== photoId);
           setMyUploads(updatedUploads);
           localStorage.setItem("public_drive_gallery_uploads", JSON.stringify(updatedUploads));
@@ -1332,6 +1377,15 @@ export default function App() {
   const getPhotoViewUrl = (photoId: string) => {
     const activeFolderId = guestFolderId || status?.folderId;
     return `/api/photos/view/${photoId}${activeFolderId ? `?folderId=${activeFolderId}` : ""}`;
+  };
+
+  // Parse the uploader name from a filename like "Sarah - photo.jpg" → "Sarah"
+  const parseUploaderName = (filename: string): string | null => {
+    const match = filename.match(/^(.+?)\s-\s.+/);
+    if (match && match[1].length > 0 && match[1].length <= 60) {
+      return match[1];
+    }
+    return null;
   };
 
   const getGridPhotoSrc = (photo: Photo) => {
@@ -1454,28 +1508,26 @@ export default function App() {
     return (
       <div className="max-w-md mx-auto mb-8 flex items-center justify-between text-[11px] font-extrabold text-slate-400 select-none">
         <div className="flex flex-col items-center gap-1.5 flex-1">
-          <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${
-            currentStep === 1 
-              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs" 
-              : currentStep > 1 
-                ? "bg-emerald-500 text-white border-emerald-500" 
+          <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${currentStep === 1
+              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
+              : currentStep > 1
+                ? "bg-emerald-500 text-white border-emerald-500"
                 : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
-          }`}>
+            }`}>
             {currentStep > 1 ? "✓" : "1"}
           </div>
           <span className={currentStep === 1 ? "text-indigo-600 dark:text-indigo-400 font-sans" : "text-slate-400 dark:text-slate-550 font-sans font-semibold"}>1. Link Drive</span>
         </div>
-        
+
         <div className="h-0.5 bg-slate-150 dark:bg-slate-800 flex-1 -mt-4.5 mx-2" />
 
         <div className="flex flex-col items-center gap-1.5 flex-1">
-          <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${
-            currentStep === 2 
-              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs" 
-              : currentStep > 2 
-                ? "bg-emerald-500 text-white border-emerald-500" 
+          <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${currentStep === 2
+              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
+              : currentStep > 2
+                ? "bg-emerald-500 text-white border-emerald-500"
                 : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
-          }`}>
+            }`}>
             {currentStep > 2 ? "✓" : "2"}
           </div>
           <span className={currentStep === 2 ? "text-indigo-600 dark:text-indigo-400 font-sans" : "text-slate-400 dark:text-slate-550 font-sans font-semibold"}>2. Pick Folder</span>
@@ -1484,11 +1536,10 @@ export default function App() {
         <div className="h-0.5 bg-slate-150 dark:bg-slate-800 flex-1 -mt-4.5 mx-2" />
 
         <div className="flex flex-col items-center gap-1.5 flex-1">
-          <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${
-            currentStep === 3 
-              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs" 
+          <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${currentStep === 3
+              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
               : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
-          }`}>
+            }`}>
             3
           </div>
           <span className={currentStep === 3 ? "text-indigo-650 dark:text-indigo-400 font-sans" : "text-slate-400 dark:text-slate-550 font-sans font-semibold"}>3. Start Sharing</span>
@@ -1579,11 +1630,10 @@ export default function App() {
           <button
             onClick={handleAdminAuthRedirect}
             disabled={status ? !status.envConfigured : true}
-            className={`w-full max-w-xs font-bold py-3 px-5 rounded-full text-white inline-flex items-center justify-center gap-1.5 transition-all text-xs cursor-pointer shadow-3xs hover:scale-[1.01] active:scale-[0.99] ${
-              status?.envConfigured 
-                ? "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100" 
+            className={`w-full max-w-xs font-bold py-3 px-5 rounded-full text-white inline-flex items-center justify-center gap-1.5 transition-all text-xs cursor-pointer shadow-3xs hover:scale-[1.01] active:scale-[0.99] ${status?.envConfigured
+                ? "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
                 : "bg-slate-200 dark:bg-slate-800 dark:text-slate-500 text-slate-400 cursor-not-allowed"
-            }`}
+              }`}
             id="connect_drive_body_button"
           >
             <span>Connect Google Drive</span>
@@ -1829,13 +1879,12 @@ export default function App() {
 
               {/* Preview thumbnails */}
               {uploadSuccessModal.uploadedPhotos.length > 0 && (
-                <div className={`grid gap-2 mb-6 ${
-                  uploadSuccessModal.uploadedPhotos.length === 1
+                <div className={`grid gap-2 mb-6 ${uploadSuccessModal.uploadedPhotos.length === 1
                     ? "grid-cols-1"
                     : uploadSuccessModal.uploadedPhotos.length === 2
-                    ? "grid-cols-2"
-                    : "grid-cols-3"
-                }`}>
+                      ? "grid-cols-2"
+                      : "grid-cols-3"
+                  }`}>
                   {uploadSuccessModal.uploadedPhotos.slice(0, 6).map((item, idx) => (
                     <motion.div
                       key={idx}
@@ -1897,7 +1946,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0b0f19] text-slate-950 dark:text-slate-100 font-sans antialiased selection:bg-slate-900 dark:selection:bg-indigo-600 selection:text-white transition-colors duration-200" id="main_app_layout">
-      
+
       {/* IN-APP BROWSER DETECTOR BANNER */}
       {showInAppBanner && (
         <div className="bg-amber-500 text-slate-950 px-4 py-3 text-xs font-bold flex items-center justify-between gap-3 shadow-md relative z-55">
@@ -1924,6 +1973,104 @@ export default function App() {
 
       {/* ── UPLOAD SUCCESS PREVIEW MODAL (z-60) ─────────────────────── */}
       {renderUploadSuccessModal()}
+
+      {/* ── GUEST NAME PROMPT MODAL (z-65) ───────────────────────────── */}
+      <AnimatePresence>
+        {showNamePrompt && guestFolderId && (
+          <div className="fixed inset-0 z-[65] flex items-center justify-center p-4" id="guest_name_prompt_modal">
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
+              onClick={() => {
+                // Skip — use no name
+                setShowNamePrompt(false);
+                if (pendingFiles.length > 0) uploadFiles(pendingFiles);
+                setPendingFiles([]);
+              }}
+            />
+            <motion.div
+              initial={{ scale: 0.88, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.88, opacity: 0, y: 20 }}
+              transition={{ type: "spring", stiffness: 300, damping: 26 }}
+              className="relative z-10 w-full max-w-sm bg-[#111827] border border-white/10 rounded-[28px] shadow-2xl overflow-hidden"
+              id="guest_name_prompt_card"
+            >
+              {/* Gradient accent bar */}
+              <div className="h-1 w-full bg-gradient-to-r from-violet-500 via-indigo-500 to-purple-500" />
+
+              <div className="p-7 space-y-6">
+                {/* Header */}
+                <div className="text-center space-y-2">
+                  <div className="text-4xl mb-2">👤</div>
+                  <h3 className="text-lg font-extrabold text-white tracking-tight">
+                    Add your name? <span className="text-slate-400 font-semibold text-sm">(optional)</span>
+                  </h3>
+                  <p className="text-sm text-slate-400 leading-relaxed">
+                    Let everyone in the gallery know who posted these photos. You can always skip this.
+                  </p>
+                </div>
+
+                {/* Name input */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const trimmed = namePromptInput.trim();
+                    if (trimmed) {
+                      sessionStorage.setItem("guest_uploader_name", trimmed);
+                      setGuestName(trimmed);
+                    }
+                    setShowNamePrompt(false);
+                    if (pendingFiles.length > 0) {
+                      // Pass name directly as override — React state update is async
+                      uploadFiles(pendingFiles, trimmed || undefined);
+                    }
+                    setPendingFiles([]);
+                  }}
+                  className="space-y-4"
+                >
+                  <input
+                    type="text"
+                    value={namePromptInput}
+                    onChange={(e) => setNamePromptInput(e.target.value)}
+                    placeholder="e.g. Sarah, Uncle Bob, Team Bride 🎀"
+                    maxLength={60}
+                    autoFocus
+                    className="w-full bg-white/5 border border-white/15 hover:border-white/30 focus:border-indigo-500 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none transition-all"
+                    id="guest_name_input"
+                  />
+
+                  <div className="flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowNamePrompt(false);
+                        if (pendingFiles.length > 0) uploadFiles(pendingFiles);
+                        setPendingFiles([]);
+                      }}
+                      className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-slate-300 font-bold text-sm rounded-2xl transition-all cursor-pointer border border-white/10"
+                      id="guest_name_skip_button"
+                    >
+                      Skip
+                    </button>
+                    <button
+                      type="submit"
+                      className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm rounded-2xl transition-all cursor-pointer shadow-lg shadow-indigo-900/40 flex items-center justify-center gap-1.5"
+                      id="guest_name_confirm_button"
+                    >
+                      <Upload className="h-4 w-4" />
+                      Upload Photos
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* GLOBAL DRAG AND DROP OVERLAY - APPLE HIGHLIGHT */}
       <AnimatePresence>
@@ -1980,7 +2127,7 @@ export default function App() {
             <>
               <div className="flex items-center gap-1.5 sm:gap-2">
                 {!status?.connected && (
-                   <button
+                  <button
                     onClick={handleAdminAuthRedirect}
                     className="text-[10.5px] sm:text-[11.5px] font-bold px-3 py-1 text-white inline-flex items-center gap-0.5 transition-all rounded-full bg-indigo-600 hover:bg-indigo-700 cursor-pointer shadow-3xs"
                     id="connect_drive_header_button"
@@ -1992,16 +2139,39 @@ export default function App() {
 
                 {status?.connected && (
                   <div className="flex items-center gap-2">
-                    <span className="text-[10.5px] sm:text-[11px] font-semibold text-emerald-850 dark:text-emerald-455 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100/60 dark:border-emerald-900 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
+                    <button
+                      onClick={() => {
+                        const next = !showAdminGuide || !showFolderDropdown;
+                        setShowAdminGuide(true);
+                        setShowFolderDropdown(next);
+                        if (next) fetchFoldersList();
+                      }}
+                      className="text-[10.5px] sm:text-[11px] font-bold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200/80 dark:border-slate-700 px-2.5 sm:px-3 py-1 rounded-full flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs"
+                      title="Quick destination folder selector"
+                      id="header_quick_folder_dropdown_button"
+                    >
+                      <FolderOpen className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                      <span className="truncate max-w-[90px] sm:max-w-[130px]">{status?.folderName || "Select Folder"}</span>
+                      <ChevronDown className={`h-3 w-3 text-slate-400 shrink-0 transition-transform ${showAdminGuide && showFolderDropdown ? "rotate-180" : ""}`} />
+                    </button>
+
+                    <span className="hidden xs:flex text-[10.5px] sm:text-[11px] font-semibold text-emerald-850 dark:text-emerald-455 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100/60 dark:border-emerald-900 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
                       <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
                       <span>Drive Connected</span>
                     </span>
                     <button
                       onClick={() => setShowAdminGuide(!showAdminGuide)}
-                      className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-900 rounded-full text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-all cursor-pointer flex items-center justify-center"
-                      title="Storage Settings"
+                      className={`text-[10.5px] sm:text-[11px] font-bold border-2 rounded-full px-3 py-1 flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs ${
+                        showAdminGuide
+                          ? "bg-slate-950 text-white border-slate-950 dark:bg-white dark:text-slate-950 dark:border-white"
+                          : "bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border-slate-950 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                      }`}
+                      title="Toggle Storage Settings"
+                      id="header_settings_gear_button"
                     >
-                      <Settings className="h-4.5 w-4.5" />
+                      <Settings className="h-3.5 w-3.5" />
+                      <span>Settings</span>
+                      <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showAdminGuide ? "rotate-180" : ""}`} />
                     </button>
                   </div>
                 )}
@@ -2058,116 +2228,311 @@ export default function App() {
         </AnimatePresence>
       </div>
 
-      {/* COLLAPSIBLE DRIVE AND FOLDERS SECTOR - CHOOSE WHICH FOLDER */}
-      <AnimatePresence>
-        {!guestFolderId && status?.connected && showAdminGuide && (
-          <motion.section
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden max-w-6xl mx-auto px-6 mb-6"
-            id="collapsible_admin_drawer"
-          >
-            <div className="bg-white border border-slate-200/80 rounded-[32px] p-6 shadow-xs space-y-6">
-              
-              {/* Header inside drawer */}
-              <div className="flex justify-between items-start">
-                <div>
-                  <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
-                    <Settings className="h-4.5 w-4.5 text-slate-800" />
-                    Storage Settings
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-1 font-sans">Manage your Google Drive connection and destination folder.</p>
-                </div>
-                <button
-                  onClick={() => setShowAdminGuide(false)}
-                  className="p-1 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-
-              {/* Folder info & Change Folder CTA */}
-              <div className="border border-slate-100 rounded-2xl p-5 bg-slate-50/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Current Destination Folder</p>
-                  <p className="text-sm font-bold text-slate-800">{status?.folderName || "None Selected"}</p>
-                </div>
-                <button
-                  onClick={() => {
-                    setForceSelectFolderState(true);
-                    setShowAdminGuide(false);
-                  }}
-                  className="text-xs font-bold text-indigo-650 bg-indigo-50 hover:bg-indigo-100 border border-indigo-150 px-4 py-2 rounded-full transition-all cursor-pointer shadow-3xs"
-                >
-                  Change Folder
-                </button>
-              </div>
-
-              {/* Google Drive Storage details & warnings */}
-              {status?.storageQuota && (
-                <div className="border border-slate-100 rounded-2xl p-5 bg-white shadow-3xs space-y-4" id="google_drive_storage_details">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <div className={`p-2 rounded-lg ${status.storageQuota.isNearingLimit ? "bg-amber-55 text-amber-600" : "bg-indigo-55 text-indigo-600"}`}>
-                        <HardDrive className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-900">
-                          Google Drive Storage Quota
-                        </h4>
-                        <p className="text-xs text-slate-450 font-sans mt-0.5">
-                          {status.storageQuota.percentageUsed}% of storage used
-                        </p>
-                      </div>
-                    </div>
-                    {status.storageQuota.isNearingLimit && (
-                      <span className="self-start sm:self-auto inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-705 border border-amber-200 shadow-4xs animate-pulse">
-                        <AlertTriangle className="h-3.5 w-3.5" />
-                        Storage Nearing Limit
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="w-full bg-slate-100 rounded-full h-2.5 overflow-hidden">
-                      <div 
-                        className={`h-full rounded-full transition-all duration-500 ${status.storageQuota.isNearingLimit ? "bg-amber-500" : "bg-indigo-500"}`}
-                        style={{ width: `${Math.min(status.storageQuota.percentageUsed, 100)}%` }}
-                      />
-                    </div>
-                    <div className="flex justify-between items-center text-xs font-mono text-slate-500">
-                      <span>{formatBytes(status.storageQuota.usage)} used</span>
-                      <span>Total Quota: {formatBytes(status.storageQuota.limit)}</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Account Info and Disconnect */}
-              <div className="pt-4 border-t border-slate-105 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="space-y-1">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Connected Account</p>
-                  <p className="text-xs text-slate-600">{status?.ownerEmail || "Somuchfood789@gmail.com"}</p>
-                </div>
-                <button
-                  onClick={handleDisconnect}
-                  className="text-xs font-bold text-red-650 bg-red-50 hover:bg-red-100 border border-red-150 px-5 py-2.5 rounded-full transition-all cursor-pointer"
-                  id="disconnect_account_button"
-                >
-                  Disconnect Google Drive
-                </button>
-              </div>
-
-            </div>
-          </motion.section>
-        )}
-      </AnimatePresence>
-
       {/* APPLE PHOTOS INSTANT LAYOUT AND NAVIGATION */}
       <main className="max-w-6xl mx-auto px-6 pb-24" id="main_gallery_wrapper">
-        
-        {/* Title & Core Apple Photo Navigation segment tabs */}
+
+        {/* ALWAYS VISIBLE ACCORDION DROPDOWN MODULE FOR STORAGE SETTINGS */}
+        {!guestFolderId && status?.connected && status?.folderId && (
+          <div className="pt-6 mb-4" id="storage_settings_inline_module">
+            <div
+              className="border-2 border-slate-950 dark:border-white bg-white dark:bg-slate-900 rounded-[28px] overflow-hidden shadow-md transition-all duration-200"
+              id="storage_settings_unified_card"
+            >
+              {/* Header Bar (Always visible — clickable toggle) */}
+              <div
+                onClick={() => setShowAdminGuide(!showAdminGuide)}
+                className="p-4 sm:p-5 flex items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-850/80 transition-colors select-none"
+                id="storage_settings_header_toggle_bar"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="h-9 w-9 rounded-2xl bg-slate-950 dark:bg-white text-white dark:text-slate-950 flex items-center justify-center shrink-0 shadow-xs">
+                    <Settings className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="font-extrabold text-sm text-slate-950 dark:text-white flex items-center gap-2 flex-wrap">
+                      <span>Storage Settings</span>
+                      <span className="text-[10px] font-bold font-mono px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+                        📁 {status.folderName || "Folder"}
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                      Destination folder &bull; Google Drive quota &bull; Guest name permissions
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-950 dark:text-white bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 px-3.5 py-2 rounded-full border border-slate-300 dark:border-slate-700 shrink-0">
+                  <span>{showAdminGuide ? "Close" : "Expand"}</span>
+                  <ChevronDown className={`h-4 w-4 transition-transform duration-300 ${showAdminGuide ? "rotate-180" : ""}`} />
+                </div>
+              </div>
+
+              {/* Smooth Dropdown Content Area */}
+              <AnimatePresence initial={false}>
+                {showAdminGuide && (
+                  <motion.div
+                    key="storage_settings_dropdown_body"
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+                    className="overflow-hidden"
+                  >
+                    <div className="p-6 pt-3 border-t border-slate-200/80 dark:border-slate-800 space-y-6">
+
+                      {/* Folder info & Change Folder CTA */}
+                      <div className="border-2 border-slate-950/80 dark:border-slate-700 rounded-2xl p-5 bg-slate-50/50 dark:bg-slate-950/30 space-y-4" id="storage_settings_folder_box">
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                          <div className="space-y-1">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Current Destination Folder</p>
+                            <div className="flex items-center gap-2">
+                              <FolderOpen className="h-4.5 w-4.5 text-amber-500 shrink-0" />
+                              <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{status?.folderName || "None Selected"}</p>
+                            </div>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const next = !showFolderDropdown;
+                              setShowFolderDropdown(next);
+                              if (next) fetchFoldersList();
+                            }}
+                            className="text-xs font-bold text-indigo-650 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 border border-indigo-150 dark:border-indigo-800 px-4 py-2 rounded-full transition-all cursor-pointer shadow-3xs flex items-center gap-1.5"
+                            id="toggle_folder_dropdown_button"
+                          >
+                            <span>Change Folder</span>
+                            <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${showFolderDropdown ? "rotate-180" : ""}`} />
+                          </button>
+                        </div>
+
+                        {/* Expandable Inline Dropdown Folder Picker */}
+                        <AnimatePresence>
+                          {showFolderDropdown && (
+                            <motion.div
+                              initial={{ opacity: 0, height: 0 }}
+                              animate={{ opacity: 1, height: "auto" }}
+                              exit={{ opacity: 0, height: 0 }}
+                              transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+                              className="overflow-hidden border-t border-slate-200/60 dark:border-slate-800 pt-4 mt-2 space-y-4"
+                              id="inline_folder_picker_dropdown"
+                            >
+                              {/* Create New Folder Inline Form */}
+                              <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-2xl p-3.5 shadow-3xs">
+                                <form
+                                  onSubmit={async (e) => {
+                                    await handleCreateFolder(e);
+                                    setShowFolderDropdown(false);
+                                    setShowAdminGuide(true);
+                                  }}
+                                  className="space-y-2"
+                                >
+                                  <label className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                                    <Plus className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                                    <span>Create a new folder</span>
+                                  </label>
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      value={newFolderName}
+                                      onChange={(e) => setNewFolderName(e.target.value)}
+                                      placeholder="e.g. Wedding Drop, Vacation 2026"
+                                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all text-slate-900 dark:text-slate-100"
+                                      disabled={creatingFolder}
+                                    />
+                                    <button
+                                      type="submit"
+                                      disabled={creatingFolder || !newFolderName.trim()}
+                                      className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 text-white font-bold text-xs px-4 py-2 rounded-xl transition-all flex items-center justify-center shrink-0 cursor-pointer shadow-xs active:scale-98"
+                                    >
+                                      {creatingFolder ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : "Create & Select"}
+                                    </button>
+                                  </div>
+                                </form>
+                              </div>
+
+                              {/* Select Existing Folder Dropdown List */}
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between px-1">
+                                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">
+                                    Select existing Google Drive folder:
+                                  </span>
+                                  <button
+                                    onClick={fetchFoldersList}
+                                    className="text-[10px] font-extrabold text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 flex items-center gap-1 cursor-pointer transition-colors"
+                                    disabled={loadingFolders}
+                                  >
+                                    <RefreshCw className={`h-3 w-3 ${loadingFolders ? "animate-spin" : ""}`} />
+                                    <span>Refresh List</span>
+                                  </button>
+                                </div>
+
+                                {loadingFolders ? (
+                                  <div className="p-6 border border-slate-100 dark:border-slate-800 rounded-2xl flex items-center justify-center gap-2 bg-white dark:bg-slate-900 text-xs text-slate-400">
+                                    <RefreshCw className="h-4 w-4 animate-spin text-slate-500" />
+                                    <span>Loading your Google Drive folders...</span>
+                                  </div>
+                                ) : folders.length === 0 ? (
+                                  <div className="p-5 border border-slate-200 dark:border-slate-800 border-dashed rounded-2xl text-center bg-white dark:bg-slate-900 text-xs text-slate-500">
+                                    No other Drive folders found.
+                                  </div>
+                                ) : (
+                                  <div className="max-h-56 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl p-1.5 bg-white dark:bg-slate-900 space-y-1 scrollbar-thin">
+                                    {folders.map((fld) => {
+                                      if (fld.name === "App Uploads Gallery") return null;
+                                      const isSelected = status?.folderId === fld.id;
+                                      return (
+                                        <button
+                                          key={fld.id}
+                                          onClick={async (e) => {
+                                            e.stopPropagation();
+                                            await handleSelectFolder(fld.id, fld.name);
+                                            setShowFolderDropdown(false);
+                                            setShowAdminGuide(true);
+                                          }}
+                                          className={`w-full text-left p-2.5 rounded-xl transition-all flex items-center justify-between cursor-pointer border ${isSelected
+                                              ? "bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200 font-bold"
+                                              : "bg-slate-50/40 dark:bg-slate-950/40 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent text-slate-800 dark:text-slate-200"
+                                            }`}
+                                        >
+                                          <div className="flex items-center gap-2.5 min-w-0">
+                                            <FolderOpen className={`h-4 w-4 shrink-0 ${isSelected ? "text-indigo-600 dark:text-indigo-400" : "text-amber-500"}`} />
+                                            <span className="text-xs truncate">{fld.name}</span>
+                                          </div>
+                                          {isSelected ? (
+                                            <span className="text-[10px] font-extrabold text-indigo-600 dark:text-indigo-400 bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 rounded-full font-mono">Active</span>
+                                          ) : (
+                                            <ChevronRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                          )}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+
+                      {/* Google Drive Storage details & warnings */}
+                      {status?.storageQuota && (
+                        <div className="border-2 border-slate-950/80 dark:border-slate-700 rounded-2xl p-5 bg-white dark:bg-slate-950/30 shadow-3xs space-y-4" id="google_drive_storage_details">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <div className={`p-2 rounded-lg ${status.storageQuota.isNearingLimit ? "bg-amber-55 text-amber-600" : "bg-indigo-55 text-indigo-600"}`}>
+                                <HardDrive className="h-4 w-4" />
+                              </div>
+                              <div>
+                                <h4 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                                  Google Drive Storage Quota
+                                </h4>
+                                <p className="text-xs text-slate-450 font-sans mt-0.5">
+                                  {status.storageQuota.percentageUsed}% of storage used
+                                </p>
+                              </div>
+                            </div>
+                            {status.storageQuota.isNearingLimit && (
+                              <span className="self-start sm:self-auto inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-705 border border-amber-200 shadow-4xs animate-pulse">
+                                <AlertTriangle className="h-3.5 w-3.5" />
+                                Storage Nearing Limit
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="space-y-2">
+                            <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-2.5 overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-all duration-500 ${status.storageQuota.isNearingLimit ? "bg-amber-500" : "bg-indigo-500"}`}
+                                style={{ width: `${Math.min(status.storageQuota.percentageUsed, 100)}%` }}
+                              />
+                            </div>
+                            <div className="flex justify-between items-center text-xs font-mono text-slate-500 dark:text-slate-400">
+                              <span>{formatBytes(status.storageQuota.usage)} used</span>
+                              <span>Total Quota: {formatBytes(status.storageQuota.limit)}</span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Guest Name Feature Toggle */}
+                      <div className="border-2 border-slate-950/80 dark:border-slate-700 rounded-2xl p-5 bg-white dark:bg-slate-950/30 shadow-3xs space-y-3" id="guest_names_toggle_section">
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="space-y-1 flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <Users className="h-4 w-4 text-indigo-500 shrink-0" />
+                              <p className="text-sm font-bold text-slate-900 dark:text-slate-100">Allow guest names on uploads</p>
+                            </div>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed pl-6">
+                              When on, guests can optionally enter their name before uploading. It will show as a &ldquo;Posted by&rdquo; byline on each photo card in the gallery.
+                            </p>
+                          </div>
+                          {/* Toggle Switch */}
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              const next = !allowGuestNames;
+                              setAllowGuestNames(next);
+                              try {
+                                await fetch("/api/settings", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ allowGuestNames: next }),
+                                });
+                                setSuccessMsg(next ? "Guest name prompts are now enabled." : "Guest name prompts have been turned off.");
+                              } catch (e) {
+                                setAllowGuestNames(!next); // revert on failure
+                                setErrorMsg("Failed to save settings.");
+                              }
+                            }}
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 transition-colors focus:outline-none cursor-pointer ${allowGuestNames
+                                ? "bg-indigo-600 border-indigo-600"
+                                : "bg-slate-200 border-slate-200"
+                              }`}
+                            role="switch"
+                            aria-checked={allowGuestNames}
+                            id="guest_names_toggle_button"
+                            title={allowGuestNames ? "Turn off guest name prompts" : "Turn on guest name prompts"}
+                          >
+                            <span
+                              className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${allowGuestNames ? "translate-x-5" : "translate-x-0.5"
+                                }`}
+                            />
+                          </button>
+                        </div>
+                        {allowGuestNames && (
+                          <div className="pl-6 flex items-center gap-2 text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold bg-indigo-50/60 dark:bg-indigo-950/40 px-3 py-2 rounded-xl border border-indigo-100 dark:border-indigo-900">
+                            <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                            <span>Guest photos will show a <strong>"Posted by Name"</strong> byline. The name is optional — guests can skip it.</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Account Info and Disconnect */}
+                      <div className="pt-4 border-t border-slate-105 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                        <div className="space-y-1">
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Connected Account</p>
+                          <p className="text-xs text-slate-600 dark:text-slate-300">{status?.ownerEmail || "Somuchfood789@gmail.com"}</p>
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDisconnect();
+                          }}
+                          className="text-xs font-bold text-red-650 bg-red-50 hover:bg-red-100 border border-red-150 px-5 py-2.5 rounded-full transition-all cursor-pointer"
+                          id="disconnect_account_button"
+                        >
+                          Disconnect Google Drive
+                        </button>
+                      </div>
+
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+        )}
+
         {/* Title & Core Apple Photo Navigation segment tabs */}
         {!guestFolderId && status?.connected && status?.folderId ? (
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 py-6" id="photo_controls_dashboard">
@@ -2175,7 +2540,7 @@ export default function App() {
               <h2 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100">
                 {status.folderName || "Photos"}
               </h2>
-              
+
               {/* Folder indicator subtext */}
               <p className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-1">
                 📁 Connected Folder &bull; <strong>{photos.length}</strong> {photos.length === 1 ? "photo" : "photos"}
@@ -2183,14 +2548,14 @@ export default function App() {
 
               {/* Simplified Share Card */}
               {status.folderName !== "App Uploads Gallery" && (
-                <div 
-                  className="mt-6 overflow-hidden rounded-3xl border border-indigo-100 dark:border-indigo-950 bg-linear-to-br from-white via-indigo-50/15 to-purple-50/15 dark:from-slate-900 dark:via-indigo-950/5 dark:to-purple-950/5 p-6 shadow-sm max-w-md mx-auto text-center space-y-5" 
+                <div
+                  className="mt-6 overflow-hidden rounded-3xl border border-indigo-100 dark:border-indigo-950 bg-linear-to-br from-white via-indigo-50/15 to-purple-50/15 dark:from-slate-900 dark:via-indigo-950/5 dark:to-purple-950/5 p-6 shadow-sm max-w-md mx-auto text-center space-y-5"
                   id="owner_guest_share_card"
                 >
                   <div className="flex flex-col items-center gap-4">
                     {/* Centered Big QR Code */}
                     <div id="owner_guest_share_qr" className="bg-white p-4.5 rounded-2xl border border-slate-200/60 flex items-center justify-center shadow-md relative group">
-                      <QRCodeSVG 
+                      <QRCodeSVG
                         value={getPublicGuestUrl(status.folderId!)}
                         size={140}
                         level="H"
@@ -2250,27 +2615,24 @@ export default function App() {
                   <button
                     onClick={() => setFilterType("all")}
                     aria-label="Filter: View all photos"
-                    className={`px-2.5 xs:px-4 py-1 rounded-full transition-all cursor-pointer ${
-                      filterType === "all" ? "bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs" : "text-slate-500 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white"
-                    }`}
+                    className={`px-2.5 xs:px-4 py-1 rounded-full transition-all cursor-pointer ${filterType === "all" ? "bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs" : "text-slate-500 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white"
+                      }`}
                   >
                     All Photos
                   </button>
                   <button
                     onClick={() => setFilterType("mine")}
                     aria-label="Filter: View my drops only"
-                    className={`px-2.5 xs:px-4 py-1 rounded-full transition-all cursor-pointer ${
-                      filterType === "mine" ? "bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs" : "text-slate-500 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white"
-                    }`}
+                    className={`px-2.5 xs:px-4 py-1 rounded-full transition-all cursor-pointer ${filterType === "mine" ? "bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs" : "text-slate-500 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white"
+                      }`}
                   >
                     My Drops
                   </button>
                   <button
                     onClick={() => setFilterType("recent")}
                     aria-label="Filter: View recent past 24 hours drops"
-                    className={`px-2.5 xs:px-4 py-1 rounded-full transition-all cursor-pointer ${
-                      filterType === "recent" ? "bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs" : "text-slate-500 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white"
-                    }`}
+                    className={`px-2.5 xs:px-4 py-1 rounded-full transition-all cursor-pointer ${filterType === "recent" ? "bg-white dark:bg-slate-800 text-slate-950 dark:text-white shadow-xs" : "text-slate-500 dark:text-slate-400 hover:text-slate-950 dark:hover:text-white"
+                      }`}
                   >
                     Past 24h
                   </button>
@@ -2287,11 +2649,10 @@ export default function App() {
                         setIsSelecting(true);
                       }
                     }}
-                    className={`px-3 xs:px-4 py-1.5 xs:py-2 rounded-full text-[11px] xs:text-xs font-bold select-none cursor-pointer border transition-all hover:scale-[1.02] active:scale-[0.98] ${
-                      isSelecting 
-                        ? "bg-slate-950 dark:bg-slate-100 border-slate-950 dark:border-white text-white dark:text-slate-950 shadow-xs" 
+                    className={`px-3 xs:px-4 py-1.5 xs:py-2 rounded-full text-[11px] xs:text-xs font-bold select-none cursor-pointer border transition-all hover:scale-[1.02] active:scale-[0.98] ${isSelecting
+                        ? "bg-slate-950 dark:bg-slate-100 border-slate-950 dark:border-white text-white dark:text-slate-950 shadow-xs"
                         : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-850 hover:text-slate-950 dark:hover:text-white"
-                    }`}
+                      }`}
                     title="Toggle photo selection mode"
                   >
                     {isSelecting ? "Cancel" : "Select"}
@@ -2320,11 +2681,10 @@ export default function App() {
                     setIsSelecting(true);
                   }
                 }}
-                className={`px-4 py-2 rounded-full text-xs font-bold select-none cursor-pointer border transition-all hover:scale-[1.02] active:scale-[0.98] ${
-                  isSelecting 
-                    ? "bg-slate-950 dark:bg-slate-100 border-slate-950 dark:border-white text-white dark:text-slate-950 shadow-xs" 
+                className={`px-4 py-2 rounded-full text-xs font-bold select-none cursor-pointer border transition-all hover:scale-[1.02] active:scale-[0.98] ${isSelecting
+                    ? "bg-slate-950 dark:bg-slate-100 border-slate-950 dark:border-white text-white dark:text-slate-950 shadow-xs"
                     : "bg-slate-100 dark:bg-slate-900/60 border-slate-200/20 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-805 shadow-3xs"
-                }`}
+                  }`}
                 title="Toggle photo selection mode"
               >
                 {isSelecting ? "Cancel" : "Select"}
@@ -2358,7 +2718,7 @@ export default function App() {
         {/* CONTROLS BAR: SEARCH, SORTER, GRID SCALE SLIDER */}
         {!guestFolderId && status?.connected && status?.folderId && (
           <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800/80 rounded-2xl p-4 mb-8 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 shadow-3xs transition-colors" id="controls_action_bar">
-            
+
             {/* 1. iOS Search input */}
             <div className="relative flex-1 max-w-md">
               <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 dark:text-slate-500" />
@@ -2370,7 +2730,7 @@ export default function App() {
                 className="w-full bg-slate-100 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800/80 hover:border-slate-200 dark:hover:border-slate-700/80 focus:bg-white dark:focus:bg-slate-950 rounded-xl pl-10 pr-9 py-2 text-xs font-semibold focus:outline-none focus:border-slate-800 dark:focus:border-indigo-500/80 text-slate-950 dark:text-slate-100 transition-all placeholder-slate-400 dark:placeholder-slate-500"
               />
               {searchQuery && (
-                <button 
+                <button
                   onClick={() => setSearchQuery("")}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-550 hover:text-slate-900 dark:hover:text-white text-xs font-bold"
                 >
@@ -2381,7 +2741,7 @@ export default function App() {
 
             {/* 2. Premium Grid Size Zoom and Sorters */}
             <div className="flex flex-wrap items-center gap-2 xs:gap-3 sm:gap-4 text-xs font-bold">
-              
+
               {/* Columns Slider Zoom Controller */}
               <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-950/60 border border-slate-150 dark:border-slate-800/80 px-2.5 xs:px-3 py-1.5 rounded-xl">
                 <span className="text-slate-500 dark:text-slate-400 text-[11px] font-mono select-none">Grid Zoom</span>
@@ -2430,16 +2790,19 @@ export default function App() {
           /* FORCED FOLDER CONFIGURATION CARD FOR OWNER */
           <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-[32px] p-6 sm:p-10 shadow-xs max-w-lg mx-auto space-y-6 animate-fade-in" id="forced_folder_activation">
             {renderOnboardingStepsHeader(2)}
-            
+
             {/* Back button if they already have a folder set (meaning they clicked "Change Folder") */}
             {status?.folderId && (
               <div className="flex justify-start">
                 <button
-                  onClick={() => setForceSelectFolderState(false)}
+                  onClick={() => {
+                    setForceSelectFolderState(false);
+                    setShowAdminGuide(true);
+                  }}
                   className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-slate-900 dark:hover:text-white transition-all cursor-pointer px-4 py-2 rounded-full border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950"
                 >
                   <ChevronLeft className="h-4 w-4" />
-                  <span>Back to Gallery</span>
+                  <span>Back to Storage Settings</span>
                 </button>
               </div>
             )}
@@ -2455,7 +2818,7 @@ export default function App() {
             </div>
 
             <div className="space-y-6 pt-4 border-t border-slate-100 dark:border-slate-800">
-              
+
               {/* Form 1: Create a brand new folder */}
               <div className="border border-slate-200 dark:border-slate-800 rounded-2xl p-4 bg-slate-50/50 dark:bg-slate-950/20 shadow-3xs">
                 <form onSubmit={handleCreateFolder} className="space-y-3">
@@ -2492,8 +2855,8 @@ export default function App() {
                   <span className="text-xs font-bold text-slate-400 dark:text-slate-550 uppercase tracking-wider font-mono">
                     Or select an existing folder:
                   </span>
-                  <button 
-                    onClick={fetchFoldersList} 
+                  <button
+                    onClick={fetchFoldersList}
                     className="text-[10px] font-extrabold text-indigo-600 hover:text-indigo-705 dark:text-indigo-400 dark:hover:text-indigo-300 flex items-center gap-1 cursor-pointer transition-colors"
                     disabled={loadingFolders}
                   >
@@ -2539,10 +2902,10 @@ export default function App() {
           </div>
         ) : (
           <section className="space-y-8" id="unified_dropzone_and_photos">
-            
+
             {/* Apple masonry or elegant square columns layout */}
             <div className={`grid ${getGridColsClass()} gap-4 md:gap-5`}>
-              
+
               <input
                 ref={fileInputRef}
                 type="file"
@@ -2557,11 +2920,10 @@ export default function App() {
               {!guestFolderId && (
                 <div
                   onClick={() => !uploading && fileInputRef.current?.click()}
-                  className={`relative aspect-square border-2 border-dashed rounded-2xl flex flex-col items-center justify-center text-center transition-all duration-200 select-none overflow-hidden ${
-                    uploading 
-                      ? "border-slate-300 dark:border-slate-800 bg-white dark:bg-slate-900" 
+                  className={`relative aspect-square border-2 border-dashed rounded-2xl flex flex-col items-center justify-center text-center transition-all duration-200 select-none overflow-hidden ${uploading
+                      ? "border-slate-300 dark:border-slate-800 bg-white dark:bg-slate-900"
                       : "border-slate-350 dark:border-indigo-950/60 hover:border-slate-950 dark:hover:border-indigo-500 hover:bg-white dark:hover:bg-indigo-950/20 cursor-pointer bg-white dark:bg-slate-900/30"
-                  }`}
+                    }`}
                   title="Click or Drop your picture"
                   id="integrated_uploader_card"
                 >
@@ -2570,8 +2932,8 @@ export default function App() {
                       <RefreshCw className="h-6 w-6 text-slate-950 dark:text-slate-100 animate-spin mx-auto" />
                       <p className="text-[11px] font-bold text-slate-950 dark:text-slate-100 tracking-wider uppercase">Sending to Drive...</p>
                       <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1 overflow-hidden max-w-[110px] mx-auto">
-                        <div 
-                          className="bg-slate-950 dark:bg-indigo-500 h-1 rounded-full transition-all duration-300" 
+                        <div
+                          className="bg-slate-950 dark:bg-indigo-500 h-1 rounded-full transition-all duration-300"
                           style={{ width: `${uploadProgress}%` }}
                         ></div>
                       </div>
@@ -2598,6 +2960,7 @@ export default function App() {
               {filteredPhotos.map((photo) => {
                 const isMyUpload = myUploads.includes(photo.id);
                 const isSelected = selectedPhotoIds.includes(photo.id);
+                const uploaderName = parseUploaderName(photo.name);
                 return (
                   <motion.div
                     key={photo.id}
@@ -2605,20 +2968,19 @@ export default function App() {
                     initial={{ opacity: 0, scale: 0.95 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.95 }}
-                    className={`group relative aspect-square bg-[#eaeaea] dark:bg-slate-900 rounded-2xl overflow-hidden shadow-3xs flex flex-col object-cover border transition-all duration-300 ${
-                      isSelected 
-                        ? "ring-4 ring-slate-950 dark:ring-indigo-500 ring-offset-2 dark:ring-offset-slate-950 scale-[0.98] border-transparent" 
+                    className={`group relative aspect-square bg-[#eaeaea] dark:bg-slate-900 rounded-2xl overflow-hidden shadow-3xs flex flex-col object-cover border transition-all duration-300 ${isSelected
+                        ? "ring-4 ring-slate-950 dark:ring-indigo-500 ring-offset-2 dark:ring-offset-slate-950 scale-[0.98] border-transparent"
                         : "border-slate-200/40 dark:border-slate-800/50"
-                    }`}
+                      }`}
                   >
                     {/* Media render wrapper */}
-                    <div 
+                    <div
                       className="absolute inset-0 overflow-hidden"
                       onClick={() => {
                         if (isSelecting) {
-                          setSelectedPhotoIds(prev => 
-                            prev.includes(photo.id) 
-                              ? prev.filter(id => id !== photo.id) 
+                          setSelectedPhotoIds(prev =>
+                            prev.includes(photo.id)
+                              ? prev.filter(id => id !== photo.id)
                               : [...prev, photo.id]
                           );
                         } else {
@@ -2644,10 +3006,13 @@ export default function App() {
                       <div className="absolute bottom-0 left-0 right-0 p-3.5 text-white opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex items-center justify-between pointer-events-auto gap-2">
                         <div className="min-w-0">
                           <p className="text-[11px] font-bold truncate text-[#ffffff]" title={photo.name}>
-                            {photo.name}
+                            {uploaderName ? uploaderName : photo.name}
                           </p>
                           <p className="text-[9px] text-[#ffffff]/70 font-semibold font-mono tracking-wider mt-0.5 uppercase">
-                            {formatFileSize(photo.size) || "Image"} &bull; {isMyUpload ? "Your Drop" : (isOwner ? "Guest Upload" : "Guest")}
+                            {uploaderName
+                              ? `Posted by ${uploaderName}`
+                              : `${formatFileSize(photo.size) || "Image"} • ${isMyUpload ? "Your Drop" : (isOwner ? "Guest Upload" : "Guest")}`
+                            }
                           </p>
                         </div>
 
@@ -2669,17 +3034,16 @@ export default function App() {
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          setSelectedPhotoIds(prev => 
-                            prev.includes(photo.id) 
-                              ? prev.filter(id => id !== photo.id) 
+                          setSelectedPhotoIds(prev =>
+                            prev.includes(photo.id)
+                              ? prev.filter(id => id !== photo.id)
                               : [...prev, photo.id]
                           );
                         }}
-                        className={`absolute top-3 right-3 h-6 w-6 rounded-full flex items-center justify-center border-2 transition-all z-20 shadow-3xs cursor-pointer ${
-                          isSelected 
-                            ? "bg-slate-950 border-slate-950 text-white" 
+                        className={`absolute top-3 right-3 h-6 w-6 rounded-full flex items-center justify-center border-2 transition-all z-20 shadow-3xs cursor-pointer ${isSelected
+                            ? "bg-slate-950 border-slate-950 text-white"
                             : "bg-white/90 border-slate-300 text-transparent hover:border-slate-450"
-                        }`}
+                          }`}
                       >
                         <Check className="h-4 w-4" strokeWidth={3} />
                       </button>
@@ -2724,7 +3088,7 @@ export default function App() {
                     {guestFolderId ? "No Matches Found" : "No Photos Located"}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2 max-w-xs mx-auto leading-relaxed">
-                    {guestFolderId 
+                    {guestFolderId
                       ? "No pictures matched your active search query or filter. Try switching tabs or clearing your search query."
                       : "No pictures matched your active query. Drop a photo using the card on top to populate the grid."
                     }
@@ -2739,7 +3103,7 @@ export default function App() {
       {/* FULLSCREEN PREVIEW LIGHTBOX WITH TOUCH/LEFT/RIGHT NAVIGATION controls */}
       <AnimatePresence>
         {selectedPhoto && (
-          <div 
+          <div
             className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-white/98 dark:bg-slate-950/98 backdrop-blur-md transition-colors"
             id="lightbox_modal"
             role="dialog"
@@ -2747,15 +3111,24 @@ export default function App() {
           >
             {/* Top Close Actions Row */}
             <div className="w-full max-w-5xl flex justify-between items-center mb-6 z-55 px-3">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
                 <span className="text-[11px] font-bold font-mono text-slate-500 dark:text-slate-400 uppercase tracking-wider truncate max-w-xs md:max-w-md" title={selectedPhoto.name}>
-                  {selectedPhoto.name}
+                  {(() => {
+                    const n = parseUploaderName(selectedPhoto.name);
+                    return n ? selectedPhoto.name.replace(`${n} - `, "") : selectedPhoto.name;
+                  })()}
                 </span>
                 <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-900 rounded-md text-[9px] font-bold font-mono text-slate-400 dark:text-slate-500 uppercase shrink-0">
                   {formatFileSize(selectedPhoto.size)}
                 </span>
+                {parseUploaderName(selectedPhoto.name) && (
+                  <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold border border-indigo-100 dark:border-indigo-900 shrink-0">
+                    <Users className="h-3 w-3" />
+                    Posted by {parseUploaderName(selectedPhoto.name)}
+                  </span>
+                )}
               </div>
-              <button 
+              <button
                 onClick={() => setSelectedPhoto(null)}
                 className="bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 p-2.5 rounded-full transition-all cursor-pointer"
                 aria-label="Close modal dialog"
@@ -2766,7 +3139,7 @@ export default function App() {
 
             {/* Middle Main Slider with navigation arrows */}
             <div className="max-w-5xl w-full flex-1 flex items-center justify-between xl:gap-8 relative" id="lightbox_slider_body">
-              
+
               {/* Previous button */}
               <button
                 onClick={() => navigateLightbox("prev")}
@@ -2802,19 +3175,19 @@ export default function App() {
 
             {/* Bottom Panel buttons and file detail */}
             <div className="mt-6 flex flex-col items-center gap-3">
-              
+
               {/* Quick actions row */}
               <div className="flex flex-wrap items-center gap-2">
-                
+
                 {/* Mobile inline arrows navigation comfort */}
                 <div className="flex md:hidden bg-slate-100 p-1.5 rounded-full mb-1">
-                  <button 
+                  <button
                     onClick={() => navigateLightbox("prev")}
                     className="p-1 px-3 text-slate-600 hover:text-slate-900 border-r border-slate-200"
                   >
                     <ChevronLeft className="h-4.5 w-4.5" />
                   </button>
-                  <button 
+                  <button
                     onClick={() => navigateLightbox("next")}
                     className="p-1 px-3 text-slate-600 hover:text-slate-900"
                   >
@@ -2832,7 +3205,7 @@ export default function App() {
                     <span>{isOwner && !myUploads.includes(selectedPhoto.id) ? "Delete Photo" : "Delete my photo"}</span>
                   </button>
                 )}
-                
+
                 {typeof navigator !== "undefined" && navigator.share ? (
                   <button
                     onClick={() => shareSelectedPhotosToPhone([selectedPhoto])}
@@ -2912,8 +3285,8 @@ export default function App() {
               {(isOwner ? selectedPhotoIds.length > 0 : selectedPhotoIds.some(id => myUploads.includes(id))) && (
                 <button
                   onClick={() => {
-                    const delets = isOwner 
-                      ? selectedPhotoIds 
+                    const delets = isOwner
+                      ? selectedPhotoIds
                       : selectedPhotoIds.filter(id => myUploads.includes(id));
                     handleTrashMultiplePhotos(delets);
                   }}
@@ -2922,8 +3295,8 @@ export default function App() {
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   <span className="hidden sm:inline">
-                    {isOwner 
-                      ? `Delete Selected (${selectedPhotoIds.length})` 
+                    {isOwner
+                      ? `Delete Selected (${selectedPhotoIds.length})`
                       : `Delete Ours (${selectedPhotoIds.filter(id => myUploads.includes(id)).length})`
                     }
                   </span>
@@ -2972,8 +3345,8 @@ export default function App() {
               <p className="text-[10px] text-slate-400">Please do not close this browser or reload page</p>
             </div>
             <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-              <div 
-                className="bg-slate-950 h-1.5 rounded-full transition-all duration-300" 
+              <div
+                className="bg-slate-950 h-1.5 rounded-full transition-all duration-300"
                 style={{ width: `${batchActionProgress}%` }}
               ></div>
             </div>
@@ -2995,7 +3368,7 @@ export default function App() {
                 <Upload className="h-6 w-6 text-indigo-400 animate-pulse" />
               </div>
             </div>
-            
+
             <div className="space-y-2">
               <h3 className="font-extrabold text-lg tracking-tight">Uploading Media</h3>
               <p className="text-xs text-slate-400 font-medium truncate max-w-xs mx-auto">
@@ -3009,12 +3382,12 @@ export default function App() {
             <div className="space-y-2">
               {/* Progress bar */}
               <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
-                <div 
-                  className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all duration-300 ease-out" 
+                <div
+                  className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all duration-300 ease-out"
                   style={{ width: `${uploadProgress}%` }}
                 ></div>
               </div>
-              
+
               <div className="flex justify-between items-center text-xs font-mono font-bold text-slate-400">
                 <span>{uploadProgress}%</span>
                 <span className="text-indigo-400">{uploadTimeRemaining || "Calculating time..."}</span>
@@ -3072,11 +3445,10 @@ export default function App() {
                       await callback();
                     }
                   }}
-                  className={`flex-1 py-2.5 active:scale-98 text-white text-xs font-bold rounded-2xl transition-all cursor-pointer shadow-xs ${
-                    confirmDialog.isDestructive
+                  className={`flex-1 py-2.5 active:scale-98 text-white text-xs font-bold rounded-2xl transition-all cursor-pointer shadow-xs ${confirmDialog.isDestructive
                       ? "bg-red-600 hover:bg-red-700 shadow-red-100"
                       : "bg-slate-900 hover:bg-slate-800"
-                  }`}
+                    }`}
                 >
                   {confirmDialog.confirmText}
                 </button>
@@ -3125,7 +3497,7 @@ export default function App() {
 
             {/* Main Interactive Center Section */}
             <div className="relative z-10 my-auto grid grid-cols-1 lg:grid-cols-12 gap-8 items-center max-w-6xl mx-auto w-full py-8">
-              
+
               {/* Left Column: Directives & User Value Proposition */}
               <div className="lg:col-span-7 text-left space-y-6">
                 <div className="space-y-3">
@@ -3181,16 +3553,16 @@ export default function App() {
                   <span className="mb-4 text-[9px] font-extrabold text-indigo-600 uppercase tracking-widest font-mono bg-indigo-50 border border-indigo-150 px-3.5 py-1 rounded-full">
                     Scan To Drop
                   </span>
-                  
+
                   <div className="bg-white p-3.5 rounded-3xl border border-slate-100 flex items-center justify-center shadow-md relative">
-                    <QRCodeSVG 
+                    <QRCodeSVG
                       value={getPublicGuestUrl(status.folderId!)}
                       size={200}
                       level="H"
                       includeMargin={false}
                       fgColor="#0f172a"
                     />
-                    
+
                     {/* Big lens display */}
                     <div className="absolute inset-0 m-auto h-12 w-12 rounded-full bg-slate-950 border-4 border-white flex items-center justify-center shadow-lg">
                       <ImageIcon className="h-5 w-5 text-indigo-400" />
@@ -3235,7 +3607,7 @@ export default function App() {
                       Recent drops:
                     </span>
                     {photos.slice(0, 4).map((photo) => (
-                      <div 
+                      <div
                         key={photo.id}
                         className="relative h-12 w-12 rounded-lg overflow-hidden border border-white/10 shrink-0 shadow-sm hover:scale-105 transition-all cursor-pointer group"
                         onClick={() => {
@@ -3244,8 +3616,8 @@ export default function App() {
                         }}
                         title={`View ${photo.name}`}
                       >
-                        <img 
-                          src={`/api/view/${photo.id}`} 
+                        <img
+                          src={`/api/view/${photo.id}`}
                           alt={photo.name}
                           referrerPolicy="no-referrer"
                           className="h-full w-full object-cover"
@@ -3271,7 +3643,7 @@ export default function App() {
               </p>
               <p className="text-slate-450 dark:text-slate-500 font-medium">Anyone can upload — no account needed!</p>
             </div>
-            
+
             <div className="text-xs text-slate-400 dark:text-slate-550 font-bold font-sans">
               <span>Powered by PhotoDock</span>
             </div>

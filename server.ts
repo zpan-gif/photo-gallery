@@ -61,6 +61,7 @@ interface SavedCredentials {
   folderId?: string;
   folderName?: string;
   ownerEmail?: string;
+  allowGuestNames?: boolean;
 }
 
 // Read saved credentials containing OAuth refresh token and created folder ID from Firestore
@@ -640,8 +641,13 @@ app.post("/api/upload", upload.single("photo"), async (req, res) => {
 
     const drive = getAuthorizedDriveClient(creds);
 
+    // Optionally prefix the filename with the uploader's name
+    const uploaderName = (req.body.uploaderName || "").toString().trim().slice(0, 60);
+    const rawName = req.file.originalname;
+    const finalFileName = uploaderName ? `${uploaderName} - ${rawName}` : rawName;
+
     const fileMetadata = {
-      name: req.file.originalname,
+      name: finalFileName,
       parents: [targetFolderId],
     };
 
@@ -667,6 +673,7 @@ app.post("/api/upload", upload.single("photo"), async (req, res) => {
       success: true,
       fileId: driveResponse.data.id,
       name: driveResponse.data.name,
+      uploaderName: uploaderName || null,
     });
   } catch (err: any) {
     console.error("File upload operation failed:", err);
@@ -784,6 +791,43 @@ app.post("/api/folders/create", async (req, res) => {
   } catch (err: any) {
     console.error("Folder create error:", err);
     res.status(500).json({ error: err.message || "Failed to create folder." });
+  }
+});
+
+// 12. Get Gallery Settings (public — guests read this to know if name is required)
+app.get("/api/settings", async (req, res) => {
+  const queryFolderId = req.query.folderId as string;
+  const sessionId = (req as any).sessionId;
+  try {
+    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    if (!creds) {
+      creds = await getSavedCredentials(sessionId);
+    }
+    if (!creds) {
+      return res.json({ allowGuestNames: false });
+    }
+    res.json({ allowGuestNames: !!creds.allowGuestNames });
+  } catch (err: any) {
+    console.error("Error fetching settings:", err);
+    res.json({ allowGuestNames: false });
+  }
+});
+
+// 13. Update Gallery Settings (owner-only — session gated)
+app.post("/api/settings", async (req, res) => {
+  const sessionId = (req as any).sessionId;
+  const { allowGuestNames } = req.body;
+  try {
+    const creds = await getSavedCredentials(sessionId);
+    if (!creds) {
+      return res.status(400).json({ error: "Not authenticated. You must be the gallery owner." });
+    }
+    creds.allowGuestNames = !!allowGuestNames;
+    await saveCredentials(sessionId, creds);
+    res.json({ success: true, allowGuestNames: creds.allowGuestNames });
+  } catch (err: any) {
+    console.error("Error saving settings:", err);
+    res.status(500).json({ error: err.message || "Failed to save settings." });
   }
 });
 
