@@ -32,7 +32,8 @@ import {
   AlertTriangle,
   Users,
   Sparkles,
-  Copy
+  Copy,
+  Play
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { QRCodeSVG } from "qrcode.react";
@@ -306,7 +307,7 @@ export default function App() {
   // Upload Success Preview Modal
   const [uploadSuccessModal, setUploadSuccessModal] = useState<{
     isOpen: boolean;
-    uploadedPhotos: Array<{ name: string; objectUrl: string; size: string }>;
+    uploadedPhotos: Array<{ name: string; objectUrl: string; size: string; mimeType?: string }>;
     count: number;
   }>({
     isOpen: false,
@@ -338,8 +339,9 @@ export default function App() {
   const [uploadStartTime, setUploadStartTime] = useState<number | null>(null);
   const [uploadFileSizes, setUploadFileSizes] = useState<number[]>([]);
 
-  // Guest name feature states
+  // Guest name & privacy feature states
   const [allowGuestNames, setAllowGuestNames] = useState<boolean>(false);
+  const [hideGuestGallery, setHideGuestGallery] = useState<boolean>(false);
   const [guestName, setGuestName] = useState<string>(() => sessionStorage.getItem("guest_uploader_name") || "");
   const [showNamePrompt, setShowNamePrompt] = useState<boolean>(false);
   const [namePromptInput, setNamePromptInput] = useState<string>("");
@@ -376,10 +378,14 @@ export default function App() {
       // Dynamically fetch photos based on guest or owner view
       const targetFolderId = guestFolderId || statusData.folderId;
       if (targetFolderId) {
-        const photoRes = await fetch(`/api/photos?folderId=${targetFolderId}`);
+        const myUploadsParam = encodeURIComponent(JSON.stringify(myUploads));
+        const photoRes = await fetch(`/api/photos?folderId=${targetFolderId}&myUploads=${myUploadsParam}`);
         if (photoRes.ok) {
           const photoData = await photoRes.json();
           setPhotos(photoData.photos || []);
+          if (photoData.hideGuestGallery !== undefined) {
+            setHideGuestGallery(!!photoData.hideGuestGallery);
+          }
           if (guestFolderId && photoData.folderName) {
             setGuestFolderName(photoData.folderName);
           }
@@ -387,7 +393,7 @@ export default function App() {
       } else {
         setPhotos([]);
       }
-      // Fetch gallery settings (allowGuestNames) based on active folder
+      // Fetch gallery settings (allowGuestNames, hideGuestGallery) based on active folder
       const settingsFolderId = guestFolderId || statusData.folderId;
       if (settingsFolderId) {
         try {
@@ -395,6 +401,7 @@ export default function App() {
           if (settingsRes.ok) {
             const settingsData = await settingsRes.json();
             setAllowGuestNames(!!settingsData.allowGuestNames);
+            setHideGuestGallery(!!settingsData.hideGuestGallery);
           }
         } catch (e) {
           console.error("Failed to fetch settings:", e);
@@ -938,12 +945,15 @@ export default function App() {
 
   const uploadFiles = async (files: File[], nameOverride?: string) => {
     const validFiles = files.filter(file => {
-      if (!file.type.startsWith("image/")) {
-        setErrorMsg(`Skipped "${file.name}": Must be an image file.`);
+      const isImg = file.type.startsWith("image/");
+      const isVid = file.type.startsWith("video/");
+      if (!isImg && !isVid) {
+        setErrorMsg(`Skipped "${file.name}": Must be an image or video file.`);
         return false;
       }
-      if (file.size > 15 * 1024 * 1024) {
-        setErrorMsg(`Skipped "${file.name}": Files must be under 15MB.`);
+      const maxSize = isVid ? 100 * 1024 * 1024 : 15 * 1024 * 1024;
+      if (file.size > maxSize) {
+        setErrorMsg(`Skipped "${file.name}": ${isVid ? "Videos" : "Images"} must be under ${isVid ? "100MB" : "15MB"}.`);
         return false;
       }
       return true;
@@ -990,6 +1000,7 @@ export default function App() {
       name: f.name,
       objectUrl: URL.createObjectURL(compressedBlobs[idx]),
       size: String(compressedSizes[idx]),
+      mimeType: f.type,
     }));
 
     if (isSandbox) {
@@ -1007,7 +1018,7 @@ export default function App() {
         const newPhoto: Photo = {
           id: objectUrl,
           name: file.name,
-          mimeType: file.type === "image/png" ? "image/png" : "image/jpeg",
+          mimeType: file.type.startsWith("video/") ? file.type : (file.type === "image/png" ? "image/png" : "image/jpeg"),
           createdTime: new Date().toISOString(),
           size: String(compressedSizes[idx])
         };
@@ -1054,7 +1065,10 @@ export default function App() {
       setSuccessMsg(`Uploading "${file.name}" (${i + 1} of ${total})...`);
 
       const formData = new FormData();
-      const cleanName = file.name.replace(/\.[^/.]+$/, "") + (file.type === "image/png" ? ".png" : ".jpg");
+      let cleanName = file.name;
+      if (file.type.startsWith("image/")) {
+        cleanName = file.name.replace(/\.[^/.]+$/, "") + (file.type === "image/png" ? ".png" : ".jpg");
+      }
       formData.append("photo", blob, cleanName);
       if (guestFolderId) {
         formData.append("folderId", guestFolderId);
@@ -1097,11 +1111,18 @@ export default function App() {
 
     // Refresh photos list
     try {
-      const reloadUrl = guestFolderId ? `/api/photos?folderId=${guestFolderId}` : "/api/photos";
-      const photoRes = await fetch(reloadUrl);
-      if (photoRes.ok) {
-        const photoData = await photoRes.json();
-        setPhotos(photoData.photos || []);
+      const activeFolder = guestFolderId || status?.folderId;
+      if (activeFolder) {
+        const currentUploads = JSON.parse(localStorage.getItem("public_drive_gallery_uploads") || "[]");
+        const myUploadsParam = encodeURIComponent(JSON.stringify(currentUploads));
+        const photoRes = await fetch(`/api/photos?folderId=${activeFolder}&myUploads=${myUploadsParam}`);
+        if (photoRes.ok) {
+          const photoData = await photoRes.json();
+          setPhotos(photoData.photos || []);
+          if (photoData.hideGuestGallery !== undefined) {
+            setHideGuestGallery(!!photoData.hideGuestGallery);
+          }
+        }
       }
     } catch (err: any) {
       console.error(err);
@@ -1396,6 +1417,9 @@ export default function App() {
   };
 
   const getLightboxPhotoSrc = (photo: Photo) => {
+    if (photo.mimeType?.startsWith("video/")) {
+      return getPhotoViewUrl(photo.id);
+    }
     if (photo.thumbnailLink) {
       return photo.thumbnailLink.replace(/=s\d+$/, '=s1600');
     }
@@ -1893,11 +1917,25 @@ export default function App() {
                       transition={{ delay: 0.1 + idx * 0.07 }}
                       className="relative aspect-square rounded-2xl overflow-hidden bg-slate-100 shadow-sm"
                     >
-                      <img
-                        src={item.objectUrl}
-                        alt={item.name}
-                        className="w-full h-full object-cover"
-                      />
+                      {item.mimeType?.startsWith("video/") ? (
+                        <div className="relative w-full h-full">
+                          <video
+                            src={item.objectUrl}
+                            className="w-full h-full object-cover"
+                            muted
+                            playsInline
+                          />
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                            <Play className="h-5 w-5 text-white fill-current" />
+                          </div>
+                        </div>
+                      ) : (
+                        <img
+                          src={item.objectUrl}
+                          alt={item.name}
+                          className="w-full h-full object-cover"
+                        />
+                      )}
                       {/* Success checkmark overlay */}
                       <div className="absolute top-1.5 right-1.5 h-5 w-5 rounded-full bg-emerald-500 flex items-center justify-center shadow-sm">
                         <Check className="h-3 w-3 text-white" strokeWidth={3} />
@@ -2507,6 +2545,60 @@ export default function App() {
                         )}
                       </div>
 
+                      {/* Private Guest View Mode Toggle */}
+                      <div className="border-2 border-slate-950/80 dark:border-slate-700 rounded-2xl p-5 bg-white dark:bg-slate-950/30 shadow-3xs space-y-3" id="private_mode_toggle_section">
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="space-y-1 flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <Lock className="h-4 w-4 text-amber-500 shrink-0" />
+                              <p className="text-sm font-bold text-slate-900 dark:text-slate-100">Private Guest View Mode</p>
+                            </div>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed pl-6">
+                              When active, guests only see photos they have uploaded throughout their stay. As the host, you will still see all photos from everyone.
+                            </p>
+                          </div>
+                          {/* Toggle Switch */}
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              const next = !hideGuestGallery;
+                              setHideGuestGallery(next);
+                              try {
+                                await fetch("/api/settings", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ hideGuestGallery: next }),
+                                });
+                                setSuccessMsg(next ? "Private Guest View Mode is now ON. Guests only see their own uploads." : "Private Guest View Mode is OFF. Guests can see the full shared album.");
+                                fetchStatusAndPhotos();
+                              } catch (e) {
+                                setHideGuestGallery(!next); // revert on failure
+                                setErrorMsg("Failed to save settings.");
+                              }
+                            }}
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 transition-colors focus:outline-none cursor-pointer ${hideGuestGallery
+                                ? "bg-amber-500 border-amber-500"
+                                : "bg-slate-200 border-slate-200"
+                              }`}
+                            role="switch"
+                            aria-checked={hideGuestGallery}
+                            id="private_mode_toggle_button"
+                            title={hideGuestGallery ? "Turn off Private Guest View Mode" : "Turn on Private Guest View Mode"}
+                          >
+                            <span
+                              className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${hideGuestGallery ? "translate-x-5" : "translate-x-0.5"
+                                }`}
+                            />
+                          </button>
+                        </div>
+                        {hideGuestGallery && (
+                          <div className="pl-6 flex items-center gap-2 text-[11px] text-amber-700 dark:text-amber-300 font-semibold bg-amber-50/60 dark:bg-amber-950/40 px-3 py-2 rounded-xl border border-amber-200 dark:border-amber-900">
+                            <Lock className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                            <span><strong>Private View Active:</strong> Guests will only see photos they upload. You (the host) still see all photos.</span>
+                          </div>
+                        )}
+                      </div>
+
                       {/* Account Info and Disconnect */}
                       <div className="pt-4 border-t border-slate-105 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         <div className="space-y-1">
@@ -2662,15 +2754,24 @@ export default function App() {
             )}
           </div>
         ) : !guestFolderId ? null : (
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-4 border-b border-slate-200 dark:border-slate-800/80 mb-6" id="guest_header_simple">
-            <div>
-              <h2 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-                {guestFolderName || "Shared Gallery"}
-              </h2>
-              <p className="text-xs text-slate-400 dark:text-slate-500 font-mono mt-1">
-                {photos.length} photo{photos.length !== 1 ? "s" : ""} shared &bull; Live Album
-              </p>
-            </div>
+          <>
+            {hideGuestGallery && (
+              <div className="mb-4 p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-center gap-3 text-amber-800 dark:text-amber-200 text-xs font-semibold shadow-3xs" id="guest_private_mode_banner">
+                <Lock className="h-4 w-4 shrink-0 text-amber-500" />
+                <div>
+                  <span className="font-bold">Private View Mode Active:</span> Showing photos uploaded by you throughout your stay. Other guests&apos; uploads are hidden by the host.
+                </div>
+              </div>
+            )}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 py-4 border-b border-slate-200 dark:border-slate-800/80 mb-6" id="guest_header_simple">
+              <div>
+                <h2 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+                  {guestFolderName || "Shared Gallery"}
+                </h2>
+                <p className="text-xs text-slate-400 dark:text-slate-500 font-mono mt-1">
+                  {photos.length} photo{photos.length !== 1 ? "s" : ""} shared &bull; Live Album
+                </p>
+              </div>
             <div className="flex items-center gap-3">
               <button
                 onClick={() => {
@@ -2713,7 +2814,8 @@ export default function App() {
               </div>
             </div>
           </div>
-        )}
+        </>
+      )}
 
         {/* CONTROLS BAR: SEARCH, SORTER, GRID SCALE SLIDER */}
         {!guestFolderId && status?.connected && status?.folderId && (
@@ -2910,7 +3012,7 @@ export default function App() {
                 ref={fileInputRef}
                 type="file"
                 onChange={handleFileChange}
-                accept="image/*"
+                accept="image/*,video/*"
                 className="hidden"
                 disabled={uploading}
                 multiple={true}
@@ -2996,6 +3098,13 @@ export default function App() {
                         referrerPolicy="no-referrer"
                         className="w-full h-full object-cover transition-transform duration-500 ease-out group-hover:scale-105"
                       />
+                      {photo.mimeType?.startsWith("video/") && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/15 pointer-events-none">
+                          <div className="bg-white/80 dark:bg-slate-900/80 p-2.5 rounded-full backdrop-blur-xs shadow-md group-hover:scale-110 transition-transform duration-250">
+                            <Play className="h-5 w-5 text-slate-950 dark:text-slate-100 fill-current" />
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* Gradient background overlay to guarantee readability of white hover text */}
@@ -3152,13 +3261,24 @@ export default function App() {
 
               {/* Main Image Viewport with full-stack safe referral */}
               <div className="flex-1 max-h-[70vh] flex items-center justify-center relative rounded-3xl overflow-hidden px-4">
-                <img
-                  src={getLightboxPhotoSrc(selectedPhoto)}
-                  alt={selectedPhoto.name}
-                  referrerPolicy="no-referrer"
-                  className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50"
-                  id="lightbox_active_image"
-                />
+                {selectedPhoto.mimeType?.startsWith("video/") ? (
+                  <video
+                    src={getLightboxPhotoSrc(selectedPhoto)}
+                    controls
+                    autoPlay
+                    playsInline
+                    className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50"
+                    id="lightbox_active_video"
+                  />
+                ) : (
+                  <img
+                    src={getLightboxPhotoSrc(selectedPhoto)}
+                    alt={selectedPhoto.name}
+                    referrerPolicy="no-referrer"
+                    className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50"
+                    id="lightbox_active_image"
+                  />
+                )}
               </div>
 
               {/* Next button */}

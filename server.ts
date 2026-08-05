@@ -62,6 +62,7 @@ interface SavedCredentials {
   folderName?: string;
   ownerEmail?: string;
   allowGuestNames?: boolean;
+  hideGuestGallery?: boolean;
 }
 
 // Read saved credentials containing OAuth refresh token and created folder ID from Firestore
@@ -163,8 +164,11 @@ function getAuthorizedDriveClient(creds: SavedCredentials) {
   return google.drive({ version: "v3", auth: oauth2Client });
 }
 
-// Configure multer to save uploads to the OS temp directory
-const upload = multer({ dest: os.tmpdir() });
+// Configure multer to save uploads to the OS temp directory with 100MB limit
+const upload = multer({ 
+  dest: os.tmpdir(),
+  limits: { fileSize: 100 * 1024 * 1024 }
+});
 
 // Lightweight health check endpoint for keep-alive monitoring
 app.get("/ping", (req, res) => {
@@ -526,10 +530,21 @@ app.post("/api/disconnect", async (req, res) => {
 app.get("/api/photos", async (req, res) => {
   const queryFolderId = req.query.folderId as string;
   const sessionId = (req as any).sessionId;
+  const myUploadsRaw = req.query.myUploads as string;
+  let myUploadIds: string[] = [];
+  if (myUploadsRaw) {
+    try {
+      myUploadIds = JSON.parse(myUploadsRaw);
+    } catch {
+      myUploadIds = myUploadsRaw.split(",").filter(Boolean);
+    }
+  }
+
   try {
     let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    let ownerCreds = await getSavedCredentials(sessionId);
     if (!creds) {
-      creds = await getSavedCredentials(sessionId);
+      creds = ownerCreds;
     }
     if (!creds) {
       return res.json({ connected: false, photos: [] });
@@ -542,6 +557,9 @@ app.get("/api/photos", async (req, res) => {
 
     const drive = getAuthorizedDriveClient(creds);
     
+    // Check if the current session is the owner/host of this folder
+    const isOwner = !!(ownerCreds && ownerCreds.refreshToken && ownerCreds.folderId === folderId);
+
     // If a custom folderId is specified, fetch its metadata to get the name
     let folderName = creds.folderName || "App Uploads Gallery";
     if (queryFolderId && queryFolderId !== creds.folderId) {
@@ -561,14 +579,23 @@ app.get("/api/photos", async (req, res) => {
       q: `'${folderId}' in parents and trashed = false`,
       fields: "files(id, name, mimeType, createdTime, size, thumbnailLink)",
       orderBy: "createdTime desc",
-      pageSize: 50,
+      pageSize: 100,
     });
+
+    let allFiles = driveRes.data.files || [];
+    const hideGuestGallery = !!creds.hideGuestGallery;
+
+    // If Private Guest Mode is active AND caller is a guest (not owner)
+    if (hideGuestGallery && !isOwner) {
+      allFiles = allFiles.filter(file => file.id && myUploadIds.includes(file.id));
+    }
 
     res.json({
       connected: true,
       folderId: folderId,
       folderName: folderName,
-      photos: driveRes.data.files || []
+      hideGuestGallery: hideGuestGallery,
+      photos: allFiles
     });
   } catch (err: any) {
     console.error("Error querying gallery photo list:", err);
@@ -600,10 +627,22 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
     res.setHeader("Content-Type", mimeType);
     res.setHeader("Cache-Control", "public, max-age=3600");
 
+    const requestHeaders: Record<string, string> = {};
+    if (req.headers.range) {
+      requestHeaders["Range"] = req.headers.range;
+    }
+
     const response = await drive.files.get(
       { fileId, alt: "media" },
-      { responseType: "stream" }
+      { responseType: "stream", headers: requestHeaders }
     );
+
+    if (response.status === 206) {
+      res.status(206);
+      if (response.headers["content-range"]) res.setHeader("Content-Range", response.headers["content-range"]);
+      if (response.headers["accept-ranges"]) res.setHeader("Accept-Ranges", response.headers["accept-ranges"]);
+      if (response.headers["content-length"]) res.setHeader("Content-Length", response.headers["content-length"]);
+    }
 
     response.data.pipe(res);
   } catch (err: any) {
@@ -613,15 +652,27 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
 });
 
 // 7. Client-Free upload from public guest
-app.post("/api/upload", upload.single("photo"), async (req, res) => {
+app.post("/api/upload", (req, res, next) => {
+  upload.single("photo")(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(400).json({ error: "File size exceeds the 100MB limit." });
+      }
+      return res.status(400).json({ error: err.message });
+    } else if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: "Please attach a valid photo file." });
+    return res.status(400).json({ error: "Please attach a valid photo or video file." });
   }
 
-  // Verify only images are uploaded to the public directory
-  if (!req.file.mimetype.startsWith("image/")) {
+  // Verify only images or videos are uploaded to the public directory
+  if (!req.file.mimetype.startsWith("image/") && !req.file.mimetype.startsWith("video/")) {
     try { fs.unlinkSync(req.file.path); } catch (e) {}
-    return res.status(400).json({ error: "Only image files (jpeg/png/gif/etc) are supported." });
+    return res.status(400).json({ error: "Only image and video files (jpeg/png/mp4/mov/etc) are supported." });
   }
 
   try {
@@ -794,7 +845,7 @@ app.post("/api/folders/create", async (req, res) => {
   }
 });
 
-// 12. Get Gallery Settings (public — guests read this to know if name is required)
+// 12. Get Gallery Settings (public — guests read this to know configuration)
 app.get("/api/settings", async (req, res) => {
   const queryFolderId = req.query.folderId as string;
   const sessionId = (req as any).sessionId;
@@ -804,27 +855,35 @@ app.get("/api/settings", async (req, res) => {
       creds = await getSavedCredentials(sessionId);
     }
     if (!creds) {
-      return res.json({ allowGuestNames: false });
+      return res.json({ allowGuestNames: false, hideGuestGallery: false });
     }
-    res.json({ allowGuestNames: !!creds.allowGuestNames });
+    res.json({
+      allowGuestNames: !!creds.allowGuestNames,
+      hideGuestGallery: !!creds.hideGuestGallery
+    });
   } catch (err: any) {
     console.error("Error fetching settings:", err);
-    res.json({ allowGuestNames: false });
+    res.json({ allowGuestNames: false, hideGuestGallery: false });
   }
 });
 
 // 13. Update Gallery Settings (owner-only — session gated)
 app.post("/api/settings", async (req, res) => {
   const sessionId = (req as any).sessionId;
-  const { allowGuestNames } = req.body;
+  const { allowGuestNames, hideGuestGallery } = req.body;
   try {
     const creds = await getSavedCredentials(sessionId);
     if (!creds) {
       return res.status(400).json({ error: "Not authenticated. You must be the gallery owner." });
     }
-    creds.allowGuestNames = !!allowGuestNames;
+    if (allowGuestNames !== undefined) creds.allowGuestNames = !!allowGuestNames;
+    if (hideGuestGallery !== undefined) creds.hideGuestGallery = !!hideGuestGallery;
     await saveCredentials(sessionId, creds);
-    res.json({ success: true, allowGuestNames: creds.allowGuestNames });
+    res.json({
+      success: true,
+      allowGuestNames: creds.allowGuestNames,
+      hideGuestGallery: creds.hideGuestGallery
+    });
   } catch (err: any) {
     console.error("Error saving settings:", err);
     res.status(500).json({ error: err.message || "Failed to save settings." });
