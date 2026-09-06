@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import JSZip from "jszip";
 import {
   Upload,
@@ -125,10 +125,11 @@ const DEMO_PHOTOS: Photo[] = [
 ];
 
 // Client-side canvas-based image compression helper
-const compressImage = (file: File, maxWidth = 2048, maxHeight = 2048, quality = 0.8): Promise<Blob | File> => {
+// Skips already-compressed images (< 3MB) and maintains crystal-clear 2560px 4K resolution at 88% JPEG quality for huge photos
+const compressImage = (file: File, maxWidth = 2560, maxHeight = 2560, quality = 0.88): Promise<Blob | File> => {
   return new Promise((resolve) => {
-    // If not an image, or is an animated GIF, bypass compression
-    if (!file.type.startsWith("image/") || file.type === "image/gif") {
+    // If not an image, or is an animated GIF, or is already a reasonable size (< 3MB), bypass canvas re-encoding
+    if (!file.type.startsWith("image/") || file.type === "image/gif" || file.size <= 3 * 1024 * 1024) {
       resolve(file);
       return;
     }
@@ -141,6 +142,12 @@ const compressImage = (file: File, maxWidth = 2048, maxHeight = 2048, quality = 
       img.onload = () => {
         let width = img.width;
         let height = img.height;
+
+        // If dimensions are already within limits, keep original
+        if (width <= maxWidth && height <= maxHeight) {
+          resolve(file);
+          return;
+        }
 
         // Calculate new dimensions keeping aspect ratio
         if (width > height) {
@@ -166,13 +173,12 @@ const compressImage = (file: File, maxWidth = 2048, maxHeight = 2048, quality = 
 
         ctx.drawImage(img, 0, 0, width, height);
 
-        // Keep transparent PNGs as PNG (canvas.toBlob doesn't support quality for PNG but resizing still compresses size)
-        // Convert HEIC and other types to JPEG
+        // Keep transparent PNGs as PNG
         const outputType = file.type === "image/png" ? "image/png" : "image/jpeg";
 
         canvas.toBlob(
           (blob) => {
-            if (blob) {
+            if (blob && blob.size < file.size) {
               resolve(blob);
             } else {
               resolve(file);
@@ -317,6 +323,7 @@ export default function App() {
 
   // iPhone Photo Gallery Premium visual states
   const [searchQuery, setSearchQuery] = useState("");
+  const [selectedUploader, setSelectedUploader] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<"all" | "mine" | "recent">("all");
   const [sortBy, setSortBy] = useState<"date_desc" | "date_asc" | "name_asc" | "size_desc">("date_desc");
   const [columnsCount, setColumnsCount] = useState<number>(3); // Slider value 2-6
@@ -481,7 +488,18 @@ export default function App() {
       });
   };
 
-  const handleDownloadQR = () => {
+  const triggerFallbackQRDownload = (canvas: HTMLCanvasElement, fileName: string) => {
+    const png = canvas.toDataURL("image/png");
+    const downloadLink = document.createElement("a");
+    downloadLink.href = png;
+    downloadLink.download = fileName;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
+    setSuccessMsg("Successfully downloaded high-res guest flyer QR Code!");
+  };
+
+  const handleDownloadQR = async () => {
     try {
       const svg = document.querySelector("#owner_guest_share_qr svg") as SVGElement;
       if (!svg) {
@@ -491,32 +509,75 @@ export default function App() {
       const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
       const blobURL = URL.createObjectURL(svgBlob);
       const image = new Image();
-      image.onload = () => {
-        const canvas = document.createElement("canvas");
-        const ctxWidth = 400;
-        const ctxHeight = 400;
-        canvas.width = ctxWidth;
-        canvas.height = ctxHeight;
-        const context = canvas.getContext("2d");
-        if (context) {
-          context.fillStyle = "#ffffff";
-          context.fillRect(0, 0, ctxWidth, ctxHeight);
-          context.drawImage(image, 30, 30, ctxWidth - 60, ctxHeight - 60);
 
-          const png = canvas.toDataURL("image/png");
-          const downloadLink = document.createElement("a");
-          downloadLink.href = png;
-          downloadLink.download = `gallery_qr_${status?.folderName || "scan"}.png`;
-          document.body.appendChild(downloadLink);
-          downloadLink.click();
-          document.body.removeChild(downloadLink);
-          setSuccessMsg("Successfully downloaded high-res guest flyer QR Code!");
-        }
-      };
-      image.src = blobURL;
+      await new Promise<void>((resolve, reject) => {
+        image.onload = async () => {
+          try {
+            const canvas = document.createElement("canvas");
+            const ctxWidth = 400;
+            const ctxHeight = 400;
+            canvas.width = ctxWidth;
+            canvas.height = ctxHeight;
+            const context = canvas.getContext("2d");
+            if (!context) {
+              throw new Error("Could not create canvas context");
+            }
+            context.fillStyle = "#ffffff";
+            context.fillRect(0, 0, ctxWidth, ctxHeight);
+            context.drawImage(image, 30, 30, ctxWidth - 60, ctxHeight - 60);
+
+            const fileName = `gallery_qr_${status?.folderName || "scan"}.png`;
+
+            // Check if native Web Share API with files is available (iOS Safari / mobile)
+            // This triggers the iOS native share sheet with "Save Image" to save straight to Photos / Camera Roll
+            if (canvas.toBlob) {
+              canvas.toBlob(async (blob) => {
+                if (!blob) {
+                  triggerFallbackQRDownload(canvas, fileName);
+                  resolve();
+                  return;
+                }
+
+                const file = new File([blob], fileName, { type: "image/png" });
+
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                  try {
+                    await navigator.share({
+                      files: [file],
+                      title: "Guest Gallery QR Code",
+                      text: "Save this QR code to your Photos",
+                    });
+                    setSuccessMsg("QR code shared! Select 'Save Image' to save directly to your Photos.");
+                    resolve();
+                    return;
+                  } catch (shareErr: any) {
+                    if (shareErr.name === "AbortError") {
+                      // User dismissed share sheet
+                      resolve();
+                      return;
+                    }
+                    // Fallback to standard download if share threw an error
+                  }
+                }
+
+                // Fallback for desktop or unsupported browsers
+                triggerFallbackQRDownload(canvas, fileName);
+                resolve();
+              }, "image/png");
+            } else {
+              triggerFallbackQRDownload(canvas, fileName);
+              resolve();
+            }
+          } catch (e) {
+            reject(e);
+          }
+        };
+        image.onerror = (e) => reject(e);
+        image.src = blobURL;
+      });
     } catch (err: any) {
       console.error(err);
-      setErrorMsg("Failed to generate QR image. Feel free to right-click and save the QR code directly.");
+      setErrorMsg("Failed to generate QR image. Feel free to right-click or long-press and save the QR code directly.");
     }
   };
 
@@ -969,43 +1030,25 @@ export default function App() {
     setUploadTotal(validFiles.length);
     setUploadIndex(0);
     setUploadFileName(validFiles[0].name);
-    setUploadTimeRemaining("Compressing...");
+    setUploadTimeRemaining("Uploading...");
 
-    // Compress all files first
-    const compressedBlobs: Blob[] = [];
-    const compressedSizes: number[] = [];
-    for (let idx = 0; idx < validFiles.length; idx++) {
-      const file = validFiles[idx];
-      setUploadFileName(`Compressing "${file.name}"...`);
-      try {
-        const compressedBlob = await compressImage(file);
-        compressedBlobs.push(compressedBlob);
-        compressedSizes.push(compressedBlob.size);
-      } catch (err) {
-        console.error("Compression failed, using original file:", err);
-        compressedBlobs.push(file);
-        compressedSizes.push(file.size);
-      }
-    }
-
-    const totalSize = compressedSizes.reduce((acc, s) => acc + s, 0);
-    setUploadTotalSize(totalSize);
+    const totalRawSize = validFiles.reduce((acc, f) => acc + f.size, 0);
+    setUploadTotalSize(totalRawSize);
     setCompletedBytes(0);
     setUploadStartTime(Date.now());
-    setUploadFileSizes(compressedSizes);
-    setUploadTimeRemaining("Calculating...");
+    setUploadFileSizes(validFiles.map((f) => f.size));
 
-    // Create local object URLs for preview thumbnails before uploading
-    const previewItems = validFiles.map((f, idx) => ({
+    // Create instant local object URLs for preview thumbnails without waiting
+    const previewItems = validFiles.map((f) => ({
       name: f.name,
-      objectUrl: URL.createObjectURL(compressedBlobs[idx]),
-      size: String(compressedSizes[idx]),
+      objectUrl: URL.createObjectURL(f),
+      size: String(f.size),
       mimeType: f.type,
     }));
 
     if (isSandbox) {
       let uploadedCount = 0;
-      await new Promise(resolve => setTimeout(resolve, 800)); // Mimic networking latency
+      await new Promise((resolve) => setTimeout(resolve, 400)); // Mimic networking latency
 
       const newSimulatedPhotos: Photo[] = [];
       const currentStored = JSON.parse(localStorage.getItem("sandbox_photos") || "null") || DEMO_PHOTOS;
@@ -1020,12 +1063,12 @@ export default function App() {
           name: file.name,
           mimeType: file.type.startsWith("video/") ? file.type : (file.type === "image/png" ? "image/png" : "image/jpeg"),
           createdTime: new Date().toISOString(),
-          size: String(compressedSizes[idx])
+          size: String(file.size),
         };
         newSimulatedPhotos.push(newPhoto);
 
         // Artificial delay for visual simulation of uploading
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 300));
 
         setMyUploads((prev) => {
           const updated = [...prev, objectUrl];
@@ -1033,7 +1076,7 @@ export default function App() {
           return updated;
         });
         uploadedCount++;
-        setCompletedBytes(prev => prev + compressedSizes[idx]);
+        setCompletedBytes((prev) => prev + file.size);
       }
 
       const updatedPhotos = [...newSimulatedPhotos, ...currentStored];
@@ -1050,62 +1093,88 @@ export default function App() {
           uploadedPhotos: previewItems,
           count: uploadedCount,
         });
-      }, 650);
+      }, 500);
       return;
     }
 
+    const CONCURRENCY_LIMIT = 3;
     let uploadedCount = 0;
+    let processedCount = 0;
     const total = validFiles.length;
+    let nextIndex = 0;
+    const activeUploaderName = nameOverride !== undefined ? nameOverride : guestName;
+    const uploadUrl = guestFolderId ? `/api/upload?folderId=${guestFolderId}` : "/api/upload";
 
-    for (let i = 0; i < total; i++) {
-      const file = validFiles[i];
-      const blob = compressedBlobs[i];
-      setUploadIndex(i);
-      setUploadFileName(file.name);
-      setSuccessMsg(`Uploading "${file.name}" (${i + 1} of ${total})...`);
+    const uploadWorker = async () => {
+      while (nextIndex < total) {
+        const i = nextIndex++;
+        const file = validFiles[i];
 
-      const formData = new FormData();
-      let cleanName = file.name;
-      if (file.type.startsWith("image/")) {
-        cleanName = file.name.replace(/\.[^/.]+$/, "") + (file.type === "image/png" ? ".png" : ".jpg");
-      }
-      formData.append("photo", blob, cleanName);
-      if (guestFolderId) {
-        formData.append("folderId", guestFolderId);
-      }
-      // Pass the guest's name if they provided one (nameOverride is used when called right after the modal, before React state updates)
-      const activeUploaderName = nameOverride !== undefined ? nameOverride : guestName;
-      if (activeUploaderName) {
-        formData.append("uploaderName", activeUploaderName);
-      }
+        setUploadIndex(i);
+        setUploadFileName(file.name);
+        setSuccessMsg(`Uploading batch (${processedCount + 1} of ${total})...`);
 
-      try {
-        const uploadUrl = guestFolderId ? `/api/upload?folderId=${guestFolderId}` : "/api/upload";
-        const res = await fetch(uploadUrl, {
-          method: "POST",
-          body: formData,
-        });
-
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || `Upload failed for "${file.name}"`);
+        // Compress on-the-fly inside worker if large image (>3MB), otherwise stream original instantly
+        let uploadBlob: Blob = file;
+        if (file.type.startsWith("image/") && file.size > 3 * 1024 * 1024) {
+          try {
+            uploadBlob = await compressImage(file);
+          } catch (e) {
+            uploadBlob = file;
+          }
         }
 
-        const newUploadId = data.fileId;
-        setMyUploads((prev) => {
-          const updated = [...prev, newUploadId];
-          localStorage.setItem("public_drive_gallery_uploads", JSON.stringify(updated));
-          return updated;
-        });
+        const formData = new FormData();
+        let cleanName = file.name;
+        if (file.type.startsWith("image/")) {
+          cleanName = file.name.replace(/\.[^/.]+$/, "") + (file.type === "image/png" ? ".png" : ".jpg");
+        }
+        formData.append("photo", uploadBlob, cleanName);
+        if (guestFolderId) {
+          formData.append("folderId", guestFolderId);
+        }
+        if (activeUploaderName) {
+          formData.append("uploaderName", activeUploaderName);
+        }
 
-        uploadedCount++;
-        setCompletedBytes(prev => prev + compressedSizes[i]);
-      } catch (err: any) {
-        console.error("Batch element upload failed:", err);
-        setErrorMsg(err.message || "Failed to upload file.");
-        setCompletedBytes(prev => prev + compressedSizes[i]);
+        try {
+          const res = await fetch(uploadUrl, {
+            method: "POST",
+            body: formData,
+          });
+
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.error || `Upload failed for "${file.name}"`);
+          }
+
+          const newUploadId = data.fileId;
+          setMyUploads((prev) => {
+            const updated = [...prev, newUploadId];
+            localStorage.setItem("public_drive_gallery_uploads", JSON.stringify(updated));
+            return updated;
+          });
+
+          uploadedCount++;
+          setCompletedBytes((prev) => prev + file.size);
+        } catch (err: any) {
+          console.error("Batch element upload failed:", err);
+          setErrorMsg(err.message || "Failed to upload file.");
+          setCompletedBytes((prev) => prev + file.size);
+        } finally {
+          processedCount++;
+          setUploadProgress(Math.round((processedCount / total) * 100));
+        }
       }
+    };
+
+    // Run up to CONCURRENCY_LIMIT workers concurrently
+    const workerPromises: Promise<void>[] = [];
+    const workersCount = Math.min(CONCURRENCY_LIMIT, total);
+    for (let w = 0; w < workersCount; w++) {
+      workerPromises.push(uploadWorker());
     }
+    await Promise.all(workerPromises);
 
     setUploadProgress(100);
 
@@ -1409,6 +1478,20 @@ export default function App() {
     return null;
   };
 
+  // Extract all unique uploaders and photo counts from the current photos list
+  const uploaderList = useMemo(() => {
+    const counts: Record<string, number> = {};
+    photos.forEach((photo) => {
+      const uploader = parseUploaderName(photo.name);
+      if (uploader) {
+        counts[uploader] = (counts[uploader] || 0) + 1;
+      }
+    });
+    return Object.entries(counts)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }, [photos]);
+
   const getGridPhotoSrc = (photo: Photo) => {
     if (photo.thumbnailLink) {
       return photo.thumbnailLink.replace(/=s\d+$/, '=s600');
@@ -1445,6 +1528,41 @@ export default function App() {
     setSelectedPhoto(filteredPhotos[targetIndex]);
   };
 
+  // Touch swipe gesture support for mobile lightbox
+  const touchStartXRef = useRef<number | null>(null);
+  const touchStartYRef = useRef<number | null>(null);
+
+  const handleLightboxTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 1) {
+      touchStartXRef.current = e.touches[0].clientX;
+      touchStartYRef.current = e.touches[0].clientY;
+    }
+  };
+
+  const handleLightboxTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartXRef.current === null || touchStartYRef.current === null) return;
+    const touchEndX = e.changedTouches[0].clientX;
+    const touchEndY = e.changedTouches[0].clientY;
+
+    const deltaX = touchEndX - touchStartXRef.current;
+    const deltaY = touchEndY - touchStartYRef.current;
+
+    // Reset touch coordinates
+    touchStartXRef.current = null;
+    touchStartYRef.current = null;
+
+    // Must be a distinct horizontal swipe (horizontal movement > 40px and dominant over vertical movement)
+    if (Math.abs(deltaX) > 40 && Math.abs(deltaX) > Math.abs(deltaY) * 1.2) {
+      if (deltaX < 0) {
+        // Swiped left -> Next photo
+        navigateLightbox("next");
+      } else {
+        // Swiped right -> Previous photo
+        navigateLightbox("prev");
+      }
+    }
+  };
+
   // Keyboard navigation for Lightbox
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1455,7 +1573,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedPhoto, photos, filterType, searchQuery, sortBy]);
+  }, [selectedPhoto, photos, filterType, searchQuery, selectedUploader, sortBy]);
 
   // Escape key handler for Presenter Screen Cast mode
   useEffect(() => {
@@ -1473,14 +1591,25 @@ export default function App() {
   // Filtering & Sorting Process
   const filteredPhotos = photos
     .filter((photo) => {
-      // 1. Search Query
+      // 1. Search Query (Matches photo filename or parsed uploader name)
       if (searchQuery.trim() !== "") {
-        return photo.name.toLowerCase().includes(searchQuery.toLowerCase());
+        const query = searchQuery.toLowerCase().trim();
+        const photoName = photo.name.toLowerCase();
+        const uploader = parseUploaderName(photo.name)?.toLowerCase() || "";
+        return photoName.includes(query) || uploader.includes(query);
       }
       return true;
     })
     .filter((photo) => {
-      // 2. Tab Filter type
+      // 2. Selected Uploader Chip Filter
+      if (selectedUploader) {
+        const uploader = parseUploaderName(photo.name);
+        return uploader?.toLowerCase() === selectedUploader.toLowerCase();
+      }
+      return true;
+    })
+    .filter((photo) => {
+      // 3. Tab Filter type
       if (filterType === "mine") {
         return myUploads.includes(photo.id);
       }
@@ -1493,7 +1622,7 @@ export default function App() {
       return true;
     })
     .sort((a, b) => {
-      // 3. Sorting
+      // 4. Sorting
       if (sortBy === "date_desc") {
         return new Date(b.createdTime).getTime() - new Date(a.createdTime).getTime();
       }
@@ -1533,10 +1662,10 @@ export default function App() {
       <div className="max-w-md mx-auto mb-8 flex items-center justify-between text-[11px] font-extrabold text-slate-400 select-none">
         <div className="flex flex-col items-center gap-1.5 flex-1">
           <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${currentStep === 1
-              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
-              : currentStep > 1
-                ? "bg-emerald-500 text-white border-emerald-500"
-                : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
+            ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
+            : currentStep > 1
+              ? "bg-emerald-500 text-white border-emerald-500"
+              : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
             }`}>
             {currentStep > 1 ? "✓" : "1"}
           </div>
@@ -1547,10 +1676,10 @@ export default function App() {
 
         <div className="flex flex-col items-center gap-1.5 flex-1">
           <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${currentStep === 2
-              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
-              : currentStep > 2
-                ? "bg-emerald-500 text-white border-emerald-500"
-                : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
+            ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
+            : currentStep > 2
+              ? "bg-emerald-500 text-white border-emerald-500"
+              : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
             }`}>
             {currentStep > 2 ? "✓" : "2"}
           </div>
@@ -1561,8 +1690,8 @@ export default function App() {
 
         <div className="flex flex-col items-center gap-1.5 flex-1">
           <div className={`h-7 w-7 rounded-full flex items-center justify-center border text-[11px] transition-all ${currentStep === 3
-              ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
-              : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
+            ? "bg-indigo-605 text-white border-indigo-600 shadow-3xs"
+            : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800"
             }`}>
             3
           </div>
@@ -1655,8 +1784,8 @@ export default function App() {
             onClick={handleAdminAuthRedirect}
             disabled={status ? !status.envConfigured : true}
             className={`w-full max-w-xs font-bold py-3 px-5 rounded-full text-white inline-flex items-center justify-center gap-1.5 transition-all text-xs cursor-pointer shadow-3xs hover:scale-[1.01] active:scale-[0.99] ${status?.envConfigured
-                ? "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
-                : "bg-slate-200 dark:bg-slate-800 dark:text-slate-500 text-slate-400 cursor-not-allowed"
+              ? "bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100"
+              : "bg-slate-200 dark:bg-slate-800 dark:text-slate-500 text-slate-400 cursor-not-allowed"
               }`}
             id="connect_drive_body_button"
           >
@@ -1904,10 +2033,10 @@ export default function App() {
               {/* Preview thumbnails */}
               {uploadSuccessModal.uploadedPhotos.length > 0 && (
                 <div className={`grid gap-2 mb-6 ${uploadSuccessModal.uploadedPhotos.length === 1
-                    ? "grid-cols-1"
-                    : uploadSuccessModal.uploadedPhotos.length === 2
-                      ? "grid-cols-2"
-                      : "grid-cols-3"
+                  ? "grid-cols-1"
+                  : uploadSuccessModal.uploadedPhotos.length === 2
+                    ? "grid-cols-2"
+                    : "grid-cols-3"
                   }`}>
                   {uploadSuccessModal.uploadedPhotos.slice(0, 6).map((item, idx) => (
                     <motion.div
@@ -2199,11 +2328,10 @@ export default function App() {
                     </span>
                     <button
                       onClick={() => setShowAdminGuide(!showAdminGuide)}
-                      className={`text-[10.5px] sm:text-[11px] font-bold border-2 rounded-full px-3 py-1 flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs ${
-                        showAdminGuide
-                          ? "bg-slate-950 text-white border-slate-950 dark:bg-white dark:text-slate-950 dark:border-white"
-                          : "bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border-slate-950 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
-                      }`}
+                      className={`text-[10.5px] sm:text-[11px] font-bold border-2 rounded-full px-3 py-1 flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs ${showAdminGuide
+                        ? "bg-slate-950 text-white border-slate-950 dark:bg-white dark:text-slate-950 dark:border-white"
+                        : "bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border-slate-950 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                        }`}
                       title="Toggle Storage Settings"
                       id="header_settings_gear_button"
                     >
@@ -2428,8 +2556,8 @@ export default function App() {
                                             setShowAdminGuide(true);
                                           }}
                                           className={`w-full text-left p-2.5 rounded-xl transition-all flex items-center justify-between cursor-pointer border ${isSelected
-                                              ? "bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200 font-bold"
-                                              : "bg-slate-50/40 dark:bg-slate-950/40 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent text-slate-800 dark:text-slate-200"
+                                            ? "bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200 font-bold"
+                                            : "bg-slate-50/40 dark:bg-slate-950/40 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent text-slate-800 dark:text-slate-200"
                                             }`}
                                         >
                                           <div className="flex items-center gap-2.5 min-w-0">
@@ -2523,8 +2651,8 @@ export default function App() {
                               }
                             }}
                             className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 transition-colors focus:outline-none cursor-pointer ${allowGuestNames
-                                ? "bg-indigo-600 border-indigo-600"
-                                : "bg-slate-200 border-slate-200"
+                              ? "bg-indigo-600 border-indigo-600"
+                              : "bg-slate-200 border-slate-200"
                               }`}
                             role="switch"
                             aria-checked={allowGuestNames}
@@ -2577,8 +2705,8 @@ export default function App() {
                               }
                             }}
                             className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 transition-colors focus:outline-none cursor-pointer ${hideGuestGallery
-                                ? "bg-amber-500 border-amber-500"
-                                : "bg-slate-200 border-slate-200"
+                              ? "bg-amber-500 border-amber-500"
+                              : "bg-slate-200 border-slate-200"
                               }`}
                             role="switch"
                             aria-checked={hideGuestGallery}
@@ -2742,8 +2870,8 @@ export default function App() {
                       }
                     }}
                     className={`px-3 xs:px-4 py-1.5 xs:py-2 rounded-full text-[11px] xs:text-xs font-bold select-none cursor-pointer border transition-all hover:scale-[1.02] active:scale-[0.98] ${isSelecting
-                        ? "bg-slate-950 dark:bg-slate-100 border-slate-950 dark:border-white text-white dark:text-slate-950 shadow-xs"
-                        : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-850 hover:text-slate-950 dark:hover:text-white"
+                      ? "bg-slate-950 dark:bg-slate-100 border-slate-950 dark:border-white text-white dark:text-slate-950 shadow-xs"
+                      : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-850 hover:text-slate-950 dark:hover:text-white"
                       }`}
                     title="Toggle photo selection mode"
                   >
@@ -2772,108 +2900,149 @@ export default function App() {
                   {photos.length} photo{photos.length !== 1 ? "s" : ""} shared &bull; Live Album
                 </p>
               </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => {
-                  if (isSelecting) {
-                    setIsSelecting(false);
-                    setSelectedPhotoIds([]);
-                  } else {
-                    setIsSelecting(true);
-                  }
-                }}
-                className={`px-4 py-2 rounded-full text-xs font-bold select-none cursor-pointer border transition-all hover:scale-[1.02] active:scale-[0.98] ${isSelecting
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    if (isSelecting) {
+                      setIsSelecting(false);
+                      setSelectedPhotoIds([]);
+                    } else {
+                      setIsSelecting(true);
+                    }
+                  }}
+                  className={`px-4 py-2 rounded-full text-xs font-bold select-none cursor-pointer border transition-all hover:scale-[1.02] active:scale-[0.98] ${isSelecting
                     ? "bg-slate-950 dark:bg-slate-100 border-slate-950 dark:border-white text-white dark:text-slate-950 shadow-xs"
                     : "bg-slate-100 dark:bg-slate-900/60 border-slate-200/20 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-805 shadow-3xs"
-                  }`}
-                title="Toggle photo selection mode"
-              >
-                {isSelecting ? "Cancel" : "Select"}
-              </button>
-
-              <button
-                onClick={() => setGuestHeroVisible(true)}
-                className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-600 dark:text-slate-350 hover:text-slate-950 dark:hover:text-white transition-colors cursor-pointer bg-slate-100 dark:bg-slate-900/60 hover:bg-slate-200/80 dark:hover:bg-slate-800 px-4 py-2 rounded-full shadow-3xs"
-                title="View welcome screen"
-              >
-                <span>Welcome Screen</span>
-              </button>
-
-              <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900/60 border border-slate-200/40 dark:border-slate-800 px-4 py-2 rounded-full text-slate-700 dark:text-slate-355 shadow-3xs">
-                <ArrowUpDown className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
-                <select
-                  value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value as any)}
-                  className="bg-transparent text-xs font-bold text-slate-700 dark:text-slate-355 focus:outline-none cursor-pointer border-0 p-0 pr-1"
+                    }`}
+                  title="Toggle photo selection mode"
                 >
-                  <option value="date_desc">Newest First</option>
-                  <option value="date_asc">Oldest First</option>
-                  <option value="name_asc">Name (A-Z)</option>
-                  <option value="size_desc">File Size</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
-
-        {/* CONTROLS BAR: SEARCH, SORTER, GRID SCALE SLIDER */}
-        {!guestFolderId && status?.connected && status?.folderId && (
-          <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800/80 rounded-2xl p-4 mb-8 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 shadow-3xs transition-colors" id="controls_action_bar">
-
-            {/* 1. iOS Search input */}
-            <div className="relative flex-1 max-w-md">
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 dark:text-slate-500" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search photo titles..."
-                className="w-full bg-slate-100 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800/80 hover:border-slate-200 dark:hover:border-slate-700/80 focus:bg-white dark:focus:bg-slate-950 rounded-xl pl-10 pr-9 py-2 text-xs font-semibold focus:outline-none focus:border-slate-800 dark:focus:border-indigo-500/80 text-slate-950 dark:text-slate-100 transition-all placeholder-slate-400 dark:placeholder-slate-500"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-550 hover:text-slate-900 dark:hover:text-white text-xs font-bold"
-                >
-                  <X className="h-3.5 w-3.5" />
+                  {isSelecting ? "Cancel" : "Select"}
                 </button>
-              )}
-            </div>
 
-            {/* 2. Premium Grid Size Zoom and Sorters */}
-            <div className="flex flex-wrap items-center gap-2 xs:gap-3 sm:gap-4 text-xs font-bold">
-
-              {/* Columns Slider Zoom Controller */}
-              <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-950/60 border border-slate-150 dark:border-slate-800/80 px-2.5 xs:px-3 py-1.5 rounded-xl">
-                <span className="text-slate-500 dark:text-slate-400 text-[11px] font-mono select-none">Grid Zoom</span>
-                <input
-                  type="range"
-                  min="2"
-                  max="6"
-                  value={columnsCount}
-                  onChange={(e) => setColumnsCount(parseInt(e.target.value, 10))}
-                  className="w-16 xs:w-20 accent-slate-950 dark:accent-indigo-500 h-1 rounded-full cursor-col-resize cursor-pointer"
-                  title="Adjust column count dynamically"
-                />
-                <span className="text-slate-900 dark:text-slate-100 text-[11px] font-bold w-4 text-center">{columnsCount}</span>
-              </div>
-
-              {/* Sorter Selector dropdown */}
-              <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-150 dark:border-slate-800/80 px-2.5 xs:px-3 py-1.5 rounded-xl text-slate-700 dark:text-slate-300">
-                <ArrowUpDown className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
-                <select
-                  value={sortBy}
-                  onChange={(e: any) => setSortBy(e.target.value)}
-                  className="bg-transparent border-none text-[11px] font-bold focus:outline-none cursor-pointer text-slate-900 dark:text-slate-100 whitespace-nowrap [&>option]:bg-white dark:[&>option]:bg-slate-900 [&>option]:text-slate-900 dark:[&>option]:text-slate-100"
+                <button
+                  onClick={() => setGuestHeroVisible(true)}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-600 dark:text-slate-350 hover:text-slate-950 dark:hover:text-white transition-colors cursor-pointer bg-slate-100 dark:bg-slate-900/60 hover:bg-slate-200/80 dark:hover:bg-slate-800 px-4 py-2 rounded-full shadow-3xs"
+                  title="View welcome screen"
                 >
-                  <option value="date_desc">Newest Drop</option>
-                  <option value="date_asc">Oldest Drop</option>
-                  <option value="name_asc">Alphabetical</option>
-                  <option value="size_desc">File Size</option>
-                </select>
+                  <span>Welcome Screen</span>
+                </button>
+
+                <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900/60 border border-slate-200/40 dark:border-slate-800 px-4 py-2 rounded-full text-slate-700 dark:text-slate-355 shadow-3xs">
+                  <ArrowUpDown className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value as any)}
+                    className="bg-transparent text-xs font-bold text-slate-700 dark:text-slate-355 focus:outline-none cursor-pointer border-0 p-0 pr-1"
+                  >
+                    <option value="date_desc">Newest First</option>
+                    <option value="date_asc">Oldest First</option>
+                    <option value="name_asc">Name (A-Z)</option>
+                    <option value="size_desc">File Size</option>
+                  </select>
+                </div>
               </div>
             </div>
+          </>
+        )}
+
+        {/* CONTROLS BAR: SEARCH, UPLOADER CHIPS, SORTER, GRID SCALE SLIDER */}
+        {((status?.connected && status?.folderId) || guestFolderId) && (
+          <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800/80 rounded-2xl p-4 mb-8 flex flex-col gap-3 shadow-3xs transition-colors" id="controls_action_bar">
+            <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+              {/* 1. iOS Search input */}
+              <div className="relative flex-1 max-w-md">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 dark:text-slate-500" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search by guest name or photo..."
+                  className="w-full bg-slate-100 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800/80 hover:border-slate-200 dark:hover:border-slate-700/80 focus:bg-white dark:focus:bg-slate-950 rounded-xl pl-10 pr-9 py-2 text-xs font-semibold focus:outline-none focus:border-slate-800 dark:focus:border-indigo-500/80 text-slate-950 dark:text-slate-100 transition-all placeholder-slate-400 dark:placeholder-slate-500"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-550 hover:text-slate-900 dark:hover:text-white text-xs font-bold"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* 2. Premium Grid Size Zoom and Sorters */}
+              <div className="flex flex-wrap items-center gap-2 xs:gap-3 sm:gap-4 text-xs font-bold">
+
+                {/* Columns Slider Zoom Controller */}
+                <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-950/60 border border-slate-150 dark:border-slate-800/80 px-2.5 xs:px-3 py-1.5 rounded-xl">
+                  <span className="text-slate-500 dark:text-slate-400 text-[11px] font-mono select-none">Grid Zoom</span>
+                  <input
+                    type="range"
+                    min="2"
+                    max="6"
+                    value={columnsCount}
+                    onChange={(e) => setColumnsCount(parseInt(e.target.value, 10))}
+                    className="w-16 xs:w-20 accent-slate-950 dark:accent-indigo-500 h-1 rounded-full cursor-col-resize cursor-pointer"
+                    title="Adjust column count dynamically"
+                  />
+                  <span className="text-slate-900 dark:text-slate-100 text-[11px] font-bold w-4 text-center">{columnsCount}</span>
+                </div>
+
+                {/* Sorter Selector dropdown */}
+                <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-150 dark:border-slate-800/80 px-2.5 xs:px-3 py-1.5 rounded-xl text-slate-700 dark:text-slate-300">
+                  <ArrowUpDown className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
+                  <select
+                    value={sortBy}
+                    onChange={(e: any) => setSortBy(e.target.value)}
+                    className="bg-transparent border-none text-[11px] font-bold focus:outline-none cursor-pointer text-slate-900 dark:text-slate-100 whitespace-nowrap [&>option]:bg-white dark:[&>option]:bg-slate-900 [&>option]:text-slate-900 dark:[&>option]:text-slate-100"
+                  >
+                    <option value="date_desc">Newest Drop</option>
+                    <option value="date_asc">Oldest Drop</option>
+                    <option value="name_asc">Alphabetical</option>
+                    <option value="size_desc">File Size</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* 3. Uploader Filter Chips (Quick tap by guest name) */}
+            {uploaderList.length > 0 && (
+              <div className="flex items-center gap-1.5 pt-2.5 border-t border-slate-100 dark:border-slate-800/60 overflow-x-auto scrollbar-none py-0.5">
+                <span className="text-[11px] font-bold text-slate-400 dark:text-slate-500 shrink-0 flex items-center gap-1 mr-1">
+                  <Users className="h-3 w-3" />
+                  Guests:
+                </span>
+                <button
+                  onClick={() => setSelectedUploader(null)}
+                  className={`px-2.5 py-1 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer ${selectedUploader === null
+                      ? "bg-slate-900 dark:bg-white text-white dark:text-slate-950 shadow-xs"
+                      : "bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                    }`}
+                >
+                  All ({photos.length})
+                </button>
+                {uploaderList.map((uploader) => {
+                  const isActive = selectedUploader?.toLowerCase() === uploader.name.toLowerCase();
+                  return (
+                    <button
+                      key={uploader.name}
+                      onClick={() => setSelectedUploader(isActive ? null : uploader.name)}
+                      className={`px-2.5 py-1 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer flex items-center gap-1.5 ${isActive
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : "bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                        }`}
+                    >
+                      <span>{uploader.name}</span>
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${isActive
+                          ? "bg-white/20 text-white"
+                          : "bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400"
+                        }`}>
+                        {uploader.count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -3023,8 +3192,8 @@ export default function App() {
                 <div
                   onClick={() => !uploading && fileInputRef.current?.click()}
                   className={`relative aspect-square border-2 border-dashed rounded-2xl flex flex-col items-center justify-center text-center transition-all duration-200 select-none overflow-hidden ${uploading
-                      ? "border-slate-300 dark:border-slate-800 bg-white dark:bg-slate-900"
-                      : "border-slate-350 dark:border-indigo-950/60 hover:border-slate-950 dark:hover:border-indigo-500 hover:bg-white dark:hover:bg-indigo-950/20 cursor-pointer bg-white dark:bg-slate-900/30"
+                    ? "border-slate-300 dark:border-slate-800 bg-white dark:bg-slate-900"
+                    : "border-slate-350 dark:border-indigo-950/60 hover:border-slate-950 dark:hover:border-indigo-500 hover:bg-white dark:hover:bg-indigo-950/20 cursor-pointer bg-white dark:bg-slate-900/30"
                     }`}
                   title="Click or Drop your picture"
                   id="integrated_uploader_card"
@@ -3071,8 +3240,8 @@ export default function App() {
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.95 }}
                     className={`group relative aspect-square bg-[#eaeaea] dark:bg-slate-900 rounded-2xl overflow-hidden shadow-3xs flex flex-col object-cover border transition-all duration-300 ${isSelected
-                        ? "ring-4 ring-slate-950 dark:ring-indigo-500 ring-offset-2 dark:ring-offset-slate-950 scale-[0.98] border-transparent"
-                        : "border-slate-200/40 dark:border-slate-800/50"
+                      ? "ring-4 ring-slate-950 dark:ring-indigo-500 ring-offset-2 dark:ring-offset-slate-950 scale-[0.98] border-transparent"
+                      : "border-slate-200/40 dark:border-slate-800/50"
                       }`}
                   >
                     {/* Media render wrapper */}
@@ -3150,8 +3319,8 @@ export default function App() {
                           );
                         }}
                         className={`absolute top-3 right-3 h-6 w-6 rounded-full flex items-center justify-center border-2 transition-all z-20 shadow-3xs cursor-pointer ${isSelected
-                            ? "bg-slate-950 border-slate-950 text-white"
-                            : "bg-white/90 border-slate-300 text-transparent hover:border-slate-450"
+                          ? "bg-slate-950 border-slate-950 text-white"
+                          : "bg-white/90 border-slate-300 text-transparent hover:border-slate-450"
                           }`}
                       >
                         <Check className="h-4 w-4" strokeWidth={3} />
@@ -3197,11 +3366,24 @@ export default function App() {
                     {guestFolderId ? "No Matches Found" : "No Photos Located"}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2 max-w-xs mx-auto leading-relaxed">
-                    {guestFolderId
-                      ? "No pictures matched your active search query or filter. Try switching tabs or clearing your search query."
-                      : "No pictures matched your active query. Drop a photo using the card on top to populate the grid."
+                    {searchQuery || selectedUploader
+                      ? `No photos matched ${selectedUploader ? `uploader "${selectedUploader}"` : ""} ${searchQuery ? `"${searchQuery}"` : ""}. Try clearing filters.`
+                      : guestFolderId
+                        ? "No pictures matched your active search query or filter. Try switching tabs or clearing your search query."
+                        : "No pictures matched your active query. Drop a photo using the card on top to populate the grid."
                     }
                   </p>
+                  {(searchQuery || selectedUploader) && (
+                    <button
+                      onClick={() => {
+                        setSearchQuery("");
+                        setSelectedUploader(null);
+                      }}
+                      className="mt-4 px-4 py-1.5 rounded-full text-xs font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all cursor-pointer shadow-3xs"
+                    >
+                      Clear Filters
+                    </button>
+                  )}
                 </div>
               )
             )}
@@ -3213,10 +3395,12 @@ export default function App() {
       <AnimatePresence>
         {selectedPhoto && (
           <div
-            className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-white/98 dark:bg-slate-950/98 backdrop-blur-md transition-colors"
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-white/98 dark:bg-slate-950/98 backdrop-blur-md transition-colors select-none touch-pan-y"
             id="lightbox_modal"
             role="dialog"
             aria-modal="true"
+            onTouchStart={handleLightboxTouchStart}
+            onTouchEnd={handleLightboxTouchEnd}
           >
             {/* Top Close Actions Row */}
             <div className="w-full max-w-5xl flex justify-between items-center mb-6 z-55 px-3">
@@ -3230,11 +3414,26 @@ export default function App() {
                 <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-900 rounded-md text-[9px] font-bold font-mono text-slate-400 dark:text-slate-500 uppercase shrink-0">
                   {formatFileSize(selectedPhoto.size)}
                 </span>
+                {filteredPhotos.length > 1 && (
+                  <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-900 rounded-md text-[9px] font-bold font-mono text-slate-500 dark:text-slate-400 shrink-0">
+                    {filteredPhotos.findIndex(p => p.id === selectedPhoto.id) + 1} / {filteredPhotos.length}
+                  </span>
+                )}
                 {parseUploaderName(selectedPhoto.name) && (
-                  <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold border border-indigo-100 dark:border-indigo-900 shrink-0">
+                  <button
+                    onClick={() => {
+                      const uploader = parseUploaderName(selectedPhoto.name);
+                      if (uploader) {
+                        setSelectedUploader(uploader);
+                        setSelectedPhoto(null);
+                      }
+                    }}
+                    title={`View all photos posted by ${parseUploaderName(selectedPhoto.name)}`}
+                    className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/80 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold border border-indigo-100 dark:border-indigo-900 transition-colors cursor-pointer shrink-0"
+                  >
                     <Users className="h-3 w-3" />
                     Posted by {parseUploaderName(selectedPhoto.name)}
-                  </span>
+                  </button>
                 )}
               </div>
               <button
@@ -3259,26 +3458,36 @@ export default function App() {
                 <ChevronLeft className="h-5 w-5" />
               </button>
 
-              {/* Main Image Viewport with full-stack safe referral */}
+              {/* Main Image Viewport with swipe gesture recognition & smooth animation */}
               <div className="flex-1 max-h-[70vh] flex items-center justify-center relative rounded-3xl overflow-hidden px-4">
-                {selectedPhoto.mimeType?.startsWith("video/") ? (
-                  <video
-                    src={getLightboxPhotoSrc(selectedPhoto)}
-                    controls
-                    autoPlay
-                    playsInline
-                    className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50"
-                    id="lightbox_active_video"
-                  />
-                ) : (
-                  <img
-                    src={getLightboxPhotoSrc(selectedPhoto)}
-                    alt={selectedPhoto.name}
-                    referrerPolicy="no-referrer"
-                    className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50"
-                    id="lightbox_active_image"
-                  />
-                )}
+                <motion.div
+                  key={selectedPhoto.id}
+                  initial={{ opacity: 0, scale: 0.97 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.97 }}
+                  transition={{ duration: 0.18, ease: "easeOut" }}
+                  className="w-full h-full flex items-center justify-center"
+                >
+                  {selectedPhoto.mimeType?.startsWith("video/") ? (
+                    <video
+                      src={getLightboxPhotoSrc(selectedPhoto)}
+                      controls
+                      autoPlay
+                      playsInline
+                      className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50"
+                      id="lightbox_active_video"
+                    />
+                  ) : (
+                    <img
+                      src={getLightboxPhotoSrc(selectedPhoto)}
+                      alt={selectedPhoto.name}
+                      referrerPolicy="no-referrer"
+                      draggable={false}
+                      className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50 select-none pointer-events-none"
+                      id="lightbox_active_image"
+                    />
+                  )}
+                </motion.div>
               </div>
 
               {/* Next button */}
@@ -3566,8 +3775,8 @@ export default function App() {
                     }
                   }}
                   className={`flex-1 py-2.5 active:scale-98 text-white text-xs font-bold rounded-2xl transition-all cursor-pointer shadow-xs ${confirmDialog.isDestructive
-                      ? "bg-red-600 hover:bg-red-700 shadow-red-100"
-                      : "bg-slate-900 hover:bg-slate-800"
+                    ? "bg-red-600 hover:bg-red-700 shadow-red-100"
+                    : "bg-slate-900 hover:bg-slate-800"
                     }`}
                 >
                   {confirmDialog.confirmText}
