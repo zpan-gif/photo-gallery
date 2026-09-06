@@ -65,8 +65,18 @@ interface SavedCredentials {
   hideGuestGallery?: boolean;
 }
 
+// Fast In-Memory Credentials Cache to eliminate Firestore roundtrip latency during batch uploads
+const sessionCredentialsCache = new Map<string, { data: SavedCredentials; expires: number }>();
+const folderCredentialsCache = new Map<string, { data: SavedCredentials; expires: number }>();
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
 // Read saved credentials containing OAuth refresh token and created folder ID from Firestore
 async function getSavedCredentials(sessionId: string): Promise<SavedCredentials | null> {
+  const cached = sessionCredentialsCache.get(sessionId);
+  if (cached && cached.expires > Date.now()) {
+    return cached.data;
+  }
+
   if (!db) {
     console.error("Firebase Firestore is not initialized.");
     return null;
@@ -74,7 +84,12 @@ async function getSavedCredentials(sessionId: string): Promise<SavedCredentials 
   try {
     const doc = await db.collection("sessions").doc(sessionId).get();
     if (doc.exists) {
-      return doc.data() as SavedCredentials;
+      const data = doc.data() as SavedCredentials;
+      sessionCredentialsCache.set(sessionId, { data, expires: Date.now() + CACHE_TTL_MS });
+      if (data.folderId) {
+        folderCredentialsCache.set(data.folderId, { data, expires: Date.now() + CACHE_TTL_MS });
+      }
+      return data;
     }
   } catch (e) {
     console.error("Error reading saved credentials from Firestore:", e);
@@ -84,6 +99,11 @@ async function getSavedCredentials(sessionId: string): Promise<SavedCredentials 
 
 // Save credentials safely to Firestore
 async function saveCredentials(sessionId: string, creds: SavedCredentials) {
+  sessionCredentialsCache.set(sessionId, { data: creds, expires: Date.now() + CACHE_TTL_MS });
+  if (creds.folderId) {
+    folderCredentialsCache.set(creds.folderId, { data: creds, expires: Date.now() + CACHE_TTL_MS });
+  }
+
   if (!db) {
     console.error("Firebase Firestore is not initialized.");
     return;
@@ -97,6 +117,12 @@ async function saveCredentials(sessionId: string, creds: SavedCredentials) {
 
 // Delete credentials (disconnect)
 async function deleteCredentials(sessionId: string) {
+  const cached = sessionCredentialsCache.get(sessionId);
+  if (cached?.data?.folderId) {
+    folderCredentialsCache.delete(cached.data.folderId);
+  }
+  sessionCredentialsCache.delete(sessionId);
+
   if (!db) {
     console.error("Firebase Firestore is not initialized.");
     return;
@@ -110,6 +136,11 @@ async function deleteCredentials(sessionId: string) {
 
 // Look up credentials by target folder ID to support guest access
 async function getSavedCredentialsForFolder(folderId: string): Promise<SavedCredentials | null> {
+  const cached = folderCredentialsCache.get(folderId);
+  if (cached && cached.expires > Date.now()) {
+    return cached.data;
+  }
+
   if (!db) {
     console.error("Firebase Firestore is not initialized.");
     return null;
@@ -117,7 +148,9 @@ async function getSavedCredentialsForFolder(folderId: string): Promise<SavedCred
   try {
     const snapshot = await db.collection("sessions").where("folderId", "==", folderId).limit(1).get();
     if (!snapshot.empty) {
-      return snapshot.docs[0].data() as SavedCredentials;
+      const data = snapshot.docs[0].data() as SavedCredentials;
+      folderCredentialsCache.set(folderId, { data, expires: Date.now() + CACHE_TTL_MS });
+      return data;
     }
   } catch (e) {
     console.error("Error querying credentials for folder in Firestore:", e);
