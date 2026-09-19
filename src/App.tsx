@@ -227,6 +227,9 @@ export default function App() {
   // Lightbox view state
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
 
+  // Instant in-memory blob URLs for freshly uploaded media (0ms instant playback)
+  const [localMediaBlobs, setLocalMediaBlobs] = useState<Record<string, string>>({});
+
   // Dark/Light theme state
   const darkMode = !!guestFolderId;
 
@@ -1150,6 +1153,14 @@ export default function App() {
               return updated;
             });
 
+            // Register local blob URL for instant 0s playback
+            if (previewItems[i]?.objectUrl) {
+              setLocalMediaBlobs((prev) => ({
+                ...prev,
+                [newUploadId]: previewItems[i].objectUrl,
+              }));
+            }
+
             // Instant Optimistic Gallery Placement
             if (data.file) {
               setPhotos((prev) => {
@@ -1480,6 +1491,9 @@ export default function App() {
   };
 
   const getPhotoViewUrl = (photoId: string) => {
+    if (localMediaBlobs[photoId]) {
+      return localMediaBlobs[photoId];
+    }
     const activeFolderId = guestFolderId || status?.folderId;
     return `/api/photos/view/${photoId}${activeFolderId ? `?folderId=${activeFolderId}` : ""}`;
   };
@@ -1508,6 +1522,9 @@ export default function App() {
   }, [photos]);
 
   const getGridPhotoSrc = (photo: Photo) => {
+    if (localMediaBlobs[photo.id]) {
+      return localMediaBlobs[photo.id];
+    }
     if (photo.thumbnailLink) {
       return photo.thumbnailLink.replace(/=s\d+$/, '=s600');
     }
@@ -1515,6 +1532,9 @@ export default function App() {
   };
 
   const getLightboxPhotoSrc = (photo: Photo) => {
+    if (localMediaBlobs[photo.id]) {
+      return localMediaBlobs[photo.id];
+    }
     if (photo.mimeType?.startsWith("video/")) {
       return getPhotoViewUrl(photo.id);
     }
@@ -3021,8 +3041,8 @@ export default function App() {
                 <button
                   onClick={() => setSelectedUploader(null)}
                   className={`px-2.5 py-1 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer ${selectedUploader === null
-                      ? "bg-slate-900 dark:bg-white text-white dark:text-slate-950 shadow-xs"
-                      : "bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                    ? "bg-slate-900 dark:bg-white text-white dark:text-slate-950 shadow-xs"
+                    : "bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
                     }`}
                 >
                   All ({photos.length})
@@ -3034,14 +3054,14 @@ export default function App() {
                       key={uploader.name}
                       onClick={() => setSelectedUploader(isActive ? null : uploader.name)}
                       className={`px-2.5 py-1 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer flex items-center gap-1.5 ${isActive
-                          ? "bg-indigo-600 text-white shadow-xs"
-                          : "bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                        ? "bg-indigo-600 text-white shadow-xs"
+                        : "bg-slate-100 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
                         }`}
                     >
                       <span>{uploader.name}</span>
                       <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono font-bold ${isActive
-                          ? "bg-white/20 text-white"
-                          : "bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400"
+                        ? "bg-white/20 text-white"
+                        : "bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400"
                         }`}>
                         {uploader.count}
                       </span>

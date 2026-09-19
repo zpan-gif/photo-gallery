@@ -203,6 +203,28 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 }
 });
 
+// Cache recent uploads on disk for 5 minutes so immediate playback by guests/uploaders starts in 0.01s
+const recentUploadsCache = new Map<string, { path: string; mimeType: string; expires: number }>();
+const fileMimeCache = new Map<string, { mimeType: string; expires: number }>();
+
+// Periodic cleanup of cached temp files
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, item] of recentUploadsCache.entries()) {
+    if (item.expires < now) {
+      try {
+        if (fs.existsSync(item.path)) fs.unlinkSync(item.path);
+      } catch (e) {}
+      recentUploadsCache.delete(id);
+    }
+  }
+  for (const [id, item] of fileMimeCache.entries()) {
+    if (item.expires < now) {
+      fileMimeCache.delete(id);
+    }
+  }
+}, 60 * 1000);
+
 // Lightweight health check endpoint for keep-alive monitoring
 app.get("/ping", (req, res) => {
   res.status(200).send("OK");
@@ -641,6 +663,37 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
   const { fileId } = req.params;
   const queryFolderId = req.query.folderId as string;
   const sessionId = (req as any).sessionId;
+
+  // 1. Instant local playback if recently uploaded (bypasses Google Drive 10s processing delay)
+  const cached = recentUploadsCache.get(fileId);
+  if (cached && fs.existsSync(cached.path) && cached.expires > Date.now()) {
+    res.setHeader("Content-Type", cached.mimeType);
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    const stat = fs.statSync(cached.path);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunksize = (end - start) + 1;
+      const file = fs.createReadStream(cached.path, { start, end });
+      res.writeHead(206, {
+        "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+        "Accept-Ranges": "bytes",
+        "Content-Length": chunksize,
+        "Content-Type": cached.mimeType,
+      });
+      return file.pipe(res);
+    } else {
+      res.setHeader("Content-Length", fileSize);
+      res.setHeader("Accept-Ranges", "bytes");
+      return fs.createReadStream(cached.path).pipe(res);
+    }
+  }
+
+  // 2. Otherwise stream from Google Drive with mime caching
   try {
     let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
     if (!creds) {
@@ -651,12 +704,16 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
     }
     const drive = getAuthorizedDriveClient(creds);
 
-    const metadata = await drive.files.get({
-      fileId,
-      fields: "mimeType, name",
-    });
+    let mimeType = fileMimeCache.get(fileId)?.mimeType;
+    if (!mimeType) {
+      const metadata = await drive.files.get({
+        fileId,
+        fields: "mimeType, name",
+      });
+      mimeType = metadata.data.mimeType || "image/jpeg";
+      fileMimeCache.set(fileId, { mimeType, expires: Date.now() + 30 * 60 * 1000 });
+    }
 
-    const mimeType = metadata.data.mimeType || "image/jpeg";
     res.setHeader("Content-Type", mimeType);
     res.setHeader("Cache-Control", "public, max-age=3600");
 
@@ -762,12 +819,16 @@ app.post("/api/upload", (req, res, next) => {
       });
     }
 
-    // Delete temp file after successful Drive upload
-    try {
-      fs.unlinkSync(req.file.path);
-    } catch (e) {
-      console.error("Temp file garbage cleanup fail:", e);
-    }
+    // Cache uploaded file for 5 minutes so immediate playback by guests/uploaders starts in 0.01s
+    recentUploadsCache.set(driveResponse.data.id, {
+      path: req.file.path,
+      mimeType: driveResponse.data.mimeType || req.file.mimetype,
+      expires: Date.now() + 5 * 60 * 1000,
+    });
+    fileMimeCache.set(driveResponse.data.id, {
+      mimeType: driveResponse.data.mimeType || req.file.mimetype,
+      expires: Date.now() + 30 * 60 * 1000,
+    });
 
     res.json({
       success: true,
