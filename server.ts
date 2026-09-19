@@ -735,16 +735,32 @@ app.post("/api/upload", (req, res, next) => {
       parents: [targetFolderId],
     };
 
+    const fileSize = fs.statSync(req.file.path).size;
     const media = {
       mimeType: req.file.mimetype,
       body: fs.createReadStream(req.file.path),
     };
 
-    const driveResponse = await drive.files.create({
-      requestBody: fileMetadata,
-      media: media,
-      fields: "id, name",
-    });
+    let driveResponse;
+    if (fileSize > 5 * 1024 * 1024) {
+      // For files > 5MB (videos & high-res images), use resumable upload to bypass multipart 5MB limit
+      driveResponse = await drive.files.create(
+        {
+          requestBody: fileMetadata,
+          media: media,
+          fields: "id, name, mimeType, thumbnailLink, createdTime, size",
+        },
+        {
+          params: { uploadType: "resumable" },
+        }
+      );
+    } else {
+      driveResponse = await drive.files.create({
+        requestBody: fileMetadata,
+        media: media,
+        fields: "id, name, mimeType, thumbnailLink, createdTime, size",
+      });
+    }
 
     // Delete temp file after successful Drive upload
     try {
@@ -758,6 +774,14 @@ app.post("/api/upload", (req, res, next) => {
       fileId: driveResponse.data.id,
       name: driveResponse.data.name,
       uploaderName: uploaderName || null,
+      file: {
+        id: driveResponse.data.id,
+        name: driveResponse.data.name,
+        mimeType: driveResponse.data.mimeType || req.file.mimetype,
+        thumbnailLink: driveResponse.data.thumbnailLink || null,
+        createdTime: driveResponse.data.createdTime || new Date().toISOString(),
+        size: driveResponse.data.size || String(fileSize),
+      },
     });
   } catch (err: any) {
     console.error("File upload operation failed:", err);

@@ -637,60 +637,6 @@ export default function App() {
   }, []);
 
   // Dynamic progress and ETC updater
-  useEffect(() => {
-    if (!uploading || !uploadStartTime || uploadTotalSize === 0) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const elapsedSeconds = (now - uploadStartTime) / 1000;
-
-      // Speed in bytes/sec. Use actual speed if we have uploaded at least some bytes,
-      // otherwise default to a reasonable 1.2 MB/s.
-      let speed = 1200000; // 1.2 MB/s default
-      if (completedBytes > 0 && elapsedSeconds > 0.5) {
-        speed = completedBytes / elapsedSeconds;
-      }
-
-      // Ensure speed is sensible (min 100 KB/s, max 50 MB/s to prevent crazy estimates)
-      speed = Math.max(100000, Math.min(50000000, speed));
-
-      // Calculate remaining bytes and remaining seconds
-      const remainingBytes = Math.max(0, uploadTotalSize - completedBytes);
-      const remainingSeconds = remainingBytes / speed;
-
-      // Update progress bar
-      // Since a file is currently uploading, we can simulate its progress up to 90% of its size
-      const currentFileIndex = Math.min(uploadIndex, uploadFileSizes.length - 1);
-      const currentFileSize = uploadFileSizes[currentFileIndex] || 0;
-
-      // We can estimate how much of the current file is done by looking at how long it has been uploading.
-      // If we assume previous files took time proportional to their sizes:
-      const previousFilesSize = uploadFileSizes.slice(0, currentFileIndex).reduce((acc, s) => acc + s, 0);
-      const timeSpentOnPreviousFiles = previousFilesSize / speed;
-      const timeSpentOnCurrentFile = Math.max(0, elapsedSeconds - timeSpentOnPreviousFiles);
-      const simulatedActiveUploaded = Math.min(currentFileSize * 0.9, speed * timeSpentOnCurrentFile);
-
-      const totalSimulatedUploaded = Math.min(uploadTotalSize - 1, completedBytes + simulatedActiveUploaded);
-
-      const pct = Math.min(99, Math.round((totalSimulatedUploaded / uploadTotalSize) * 100));
-      setUploadProgress(pct);
-
-      if (remainingSeconds < 2) {
-        setUploadTimeRemaining("Finishing up...");
-      } else if (remainingSeconds < 60) {
-        setUploadTimeRemaining(`~${Math.round(remainingSeconds)}s remaining`);
-      } else {
-        const mins = Math.floor(remainingSeconds / 60);
-        const secs = Math.round(remainingSeconds % 60);
-        setUploadTimeRemaining(`~${mins}m ${secs}s remaining`);
-      }
-    }, 300);
-
-    return () => clearInterval(interval);
-  }, [uploading, uploadStartTime, uploadTotalSize, completedBytes, uploadIndex, uploadFileSizes]);
-
   // Sync folders list whenever setup drawer toggles open OR when folder is missing on active connection
   useEffect(() => {
     if (status?.connected && (showAdminGuide || !status?.folderId || status?.folderName === "App Uploads Gallery")) {
@@ -1105,6 +1051,25 @@ export default function App() {
     const activeUploaderName = nameOverride !== undefined ? nameOverride : guestName;
     const uploadUrl = guestFolderId ? `/api/upload?folderId=${guestFolderId}` : "/api/upload";
 
+    // Track real loaded bytes for each file index for accurate progress
+    const activeLoadedBytes: number[] = new Array(total).fill(0);
+
+    const formatBytes = (bytes: number) => {
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    };
+
+    const updateGlobalProgress = () => {
+      const sumLoaded = activeLoadedBytes.reduce((a, b) => a + b, 0);
+      const pct = Math.min(99, Math.round((sumLoaded / Math.max(1, totalRawSize)) * 100));
+      setUploadProgress(pct);
+      if (sumLoaded >= totalRawSize) {
+        setUploadTimeRemaining("Finalizing...");
+      } else {
+        setUploadTimeRemaining(total > 1 ? `Item ${uploadIndex + 1} of ${total}` : "Uploading...");
+      }
+    };
+
     const uploadWorker = async () => {
       while (nextIndex < total) {
         const i = nextIndex++;
@@ -1138,32 +1103,81 @@ export default function App() {
         }
 
         try {
-          const res = await fetch(uploadUrl, {
-            method: "POST",
-            body: formData,
+          const data: any = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", uploadUrl);
+
+            xhr.upload.onprogress = (event) => {
+              if (event.lengthComputable) {
+                activeLoadedBytes[i] = event.loaded;
+                updateGlobalProgress();
+              }
+            };
+
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                  resolve(JSON.parse(xhr.responseText));
+                } catch {
+                  resolve({ success: true });
+                }
+              } else {
+                try {
+                  const errData = JSON.parse(xhr.responseText);
+                  reject(new Error(errData.error || `Upload failed for "${file.name}"`));
+                } catch {
+                  reject(new Error(`Upload failed for "${file.name}" (status ${xhr.status})`));
+                }
+              }
+            };
+
+            xhr.onerror = () => reject(new Error(`Network connection error uploading "${file.name}"`));
+            xhr.ontimeout = () => reject(new Error(`Upload timed out for "${file.name}"`));
+            xhr.timeout = 10 * 60 * 1000; // 10 minutes
+
+            xhr.send(formData);
           });
 
-          const data = await res.json();
-          if (!res.ok) {
-            throw new Error(data.error || `Upload failed for "${file.name}"`);
-          }
+          // Mark this file's bytes as 100% complete
+          activeLoadedBytes[i] = file.size;
+          updateGlobalProgress();
 
           const newUploadId = data.fileId;
-          setMyUploads((prev) => {
-            const updated = [...prev, newUploadId];
-            localStorage.setItem("public_drive_gallery_uploads", JSON.stringify(updated));
-            return updated;
-          });
+          if (newUploadId) {
+            setMyUploads((prev) => {
+              const updated = [...prev, newUploadId];
+              localStorage.setItem("public_drive_gallery_uploads", JSON.stringify(updated));
+              return updated;
+            });
+
+            // Instant Optimistic Gallery Placement
+            if (data.file) {
+              setPhotos((prev) => {
+                if (prev.some((p) => p.id === data.file.id)) return prev;
+                return [data.file, ...prev];
+              });
+            } else {
+              const optimisticPhoto: Photo = {
+                id: newUploadId,
+                name: data.name || cleanName,
+                mimeType: file.type,
+                createdTime: new Date().toISOString(),
+                size: String(file.size),
+              };
+              setPhotos((prev) => [optimisticPhoto, ...prev]);
+            }
+          }
 
           uploadedCount++;
           setCompletedBytes((prev) => prev + file.size);
         } catch (err: any) {
           console.error("Batch element upload failed:", err);
           setErrorMsg(err.message || "Failed to upload file.");
+          activeLoadedBytes[i] = file.size;
+          updateGlobalProgress();
           setCompletedBytes((prev) => prev + file.size);
         } finally {
           processedCount++;
-          setUploadProgress(Math.round((processedCount / total) * 100));
         }
       }
     };
@@ -1177,6 +1191,7 @@ export default function App() {
     await Promise.all(workerPromises);
 
     setUploadProgress(100);
+    setUploadTimeRemaining("Completed!");
 
     // Refresh photos list
     try {
@@ -2021,12 +2036,12 @@ export default function App() {
                   🎉
                 </motion.div>
                 <h3 className="text-xl font-extrabold text-slate-900 tracking-tight">
-                  {uploadSuccessModal.count === 1 ? "Photo Shared!" : `${uploadSuccessModal.count} Photos Shared!`}
+                  {uploadSuccessModal.count === 1 ? "Upload Complete!" : `${uploadSuccessModal.count} Uploads Complete!`}
                 </h3>
                 <p className="text-sm text-slate-500 mt-1">
                   {uploadSuccessModal.count === 1
-                    ? "Your photo has been added to the shared gallery."
-                    : `All ${uploadSuccessModal.count} photos are now live in the gallery.`}
+                    ? "Your media is now live in the album."
+                    : `All ${uploadSuccessModal.count} items are now live in the album.`}
                 </p>
               </div>
 
@@ -2919,14 +2934,6 @@ export default function App() {
                   {isSelecting ? "Cancel" : "Select"}
                 </button>
 
-                <button
-                  onClick={() => setGuestHeroVisible(true)}
-                  className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-600 dark:text-slate-350 hover:text-slate-950 dark:hover:text-white transition-colors cursor-pointer bg-slate-100 dark:bg-slate-900/60 hover:bg-slate-200/80 dark:hover:bg-slate-800 px-4 py-2 rounded-full shadow-3xs"
-                  title="View welcome screen"
-                >
-                  <span>Welcome Screen</span>
-                </button>
-
                 <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900/60 border border-slate-200/40 dark:border-slate-800 px-4 py-2 rounded-full text-slate-700 dark:text-slate-355 shadow-3xs">
                   <ArrowUpDown className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
                   <select
@@ -3201,7 +3208,7 @@ export default function App() {
                   {uploading ? (
                     <div className="space-y-3 w-full px-4 text-center">
                       <RefreshCw className="h-6 w-6 text-slate-950 dark:text-slate-100 animate-spin mx-auto" />
-                      <p className="text-[11px] font-bold text-slate-950 dark:text-slate-100 tracking-wider uppercase">Sending to Drive...</p>
+                      <p className="text-[11px] font-bold text-slate-950 dark:text-slate-100 tracking-wider uppercase">Uploading...</p>
                       <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1 overflow-hidden max-w-[110px] mx-auto">
                         <div
                           className="bg-slate-950 dark:bg-indigo-500 h-1 rounded-full transition-all duration-300"
@@ -3632,17 +3639,17 @@ export default function App() {
                 </button>
               )}
 
-              {/* Download ZIP button */}
+              {/* Download ZIP button (Desktop / Laptop only) */}
               <button
                 disabled={selectedPhotoIds.length === 0 || batchActionLoading}
                 onClick={() => {
                   const items = photos.filter(p => selectedPhotoIds.includes(p.id));
                   downloadSelectedPhotosAsZip(items);
                 }}
-                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 disabled:bg-slate-50 disabled:text-slate-300 text-slate-700 font-bold text-xs rounded-2xl transition-all cursor-pointer flex items-center gap-1.5 shadow-3xs"
+                className="hidden md:flex px-4 py-2.5 bg-slate-100 hover:bg-slate-200 disabled:bg-slate-50 disabled:text-slate-300 text-slate-700 font-bold text-xs rounded-2xl transition-all cursor-pointer items-center gap-1.5 shadow-3xs"
               >
                 <FolderOpen className="h-3.5 w-3.5 text-amber-500" />
-                <span>Zip Archive</span>
+                <span>Download ZIP</span>
               </button>
 
               {/* Direct Save to Camera Roll (Phone native Share sheet) */}
