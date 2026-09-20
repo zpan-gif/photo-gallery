@@ -24,6 +24,7 @@ import {
   FolderPlus,
   Tv,
   Download,
+  Share2,
   QrCode,
   ExternalLink,
   Sun,
@@ -33,7 +34,8 @@ import {
   Users,
   Sparkles,
   Copy,
-  Play
+  Play,
+  LogOut
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { QRCodeSVG } from "qrcode.react";
@@ -52,6 +54,11 @@ interface ServerStatus {
   folderId: string | null;
   folderName: string | null;
   ownerEmail?: string | null;
+  userEmail?: string | null;
+  isHost?: boolean;
+  isCoHost?: boolean;
+  canEdit?: boolean;
+  userRole?: string;
   envConfigured: boolean;
   storageQuota?: {
     limit: string;
@@ -226,6 +233,28 @@ export default function App() {
 
   // Lightbox view state
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null);
+  const [showControls, setShowControls] = useState(true);
+  const [videoError, setVideoError] = useState(false);
+  const [useDrivePlayer, setUseDrivePlayer] = useState(false);
+
+  // Always reveal controls and reset video error when opening a new photo
+  useEffect(() => {
+    if (selectedPhoto) {
+      setShowControls(true);
+      setVideoError(false);
+      const isVid = selectedPhoto.mimeType?.startsWith("video/") || selectedPhoto.name.match(/\.(mov|mp4|m4v|webm|avi|mkv)$/i);
+      const isMov = selectedPhoto.name.toLowerCase().endsWith(".mov") || selectedPhoto.mimeType === "video/quicktime";
+      const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+
+      // On Android devices, .mov files cannot decode in native HTML5 video tags, so auto-switch to Drive preview stream
+      if (isVid && isAndroid && isMov) {
+        setUseDrivePlayer(true);
+        fetch(`/api/photos/ensure-permission/${selectedPhoto.id}`, { method: "POST" }).catch(() => {});
+      } else {
+        setUseDrivePlayer(false);
+      }
+    }
+  }, [selectedPhoto?.id]);
 
   // Instant in-memory blob URLs for freshly uploaded media (0ms instant playback)
   const [localMediaBlobs, setLocalMediaBlobs] = useState<Record<string, string>>({});
@@ -241,7 +270,14 @@ export default function App() {
     }
   }, [guestFolderId]);
 
-  const isOwner = !guestFolderId && (status?.connected ?? false);
+  const isCoHost = Boolean(status?.isCoHost);
+  const canModerate = Boolean(
+    (!guestFolderId && status?.connected) ||
+    status?.isHost ||
+    status?.isCoHost ||
+    status?.canEdit
+  );
+  const isOwner = Boolean(!guestFolderId && (status?.connected ?? false) && !isCoHost);
 
   // Administrative Setup states
   const [showAdminGuide, setShowAdminGuide] = useState(false);
@@ -380,7 +416,8 @@ export default function App() {
 
   const fetchStatusAndPhotos = async () => {
     try {
-      const statusRes = await fetch("/api/status");
+      const statusUrl = guestFolderId ? `/api/status?folderId=${guestFolderId}` : "/api/status";
+      const statusRes = await fetch(statusUrl);
       if (!statusRes.ok) throw new Error("Failed to load server auth status");
       const statusData: ServerStatus = await statusRes.json();
       setStatus(statusData);
@@ -388,16 +425,35 @@ export default function App() {
       // Dynamically fetch photos based on guest or owner view
       const targetFolderId = guestFolderId || statusData.folderId;
       if (targetFolderId) {
-        const myUploadsParam = encodeURIComponent(JSON.stringify(myUploads));
-        const photoRes = await fetch(`/api/photos?folderId=${targetFolderId}&myUploads=${myUploadsParam}`);
-        if (photoRes.ok) {
-          const photoData = await photoRes.json();
-          setPhotos(photoData.photos || []);
-          if (photoData.hideGuestGallery !== undefined) {
-            setHideGuestGallery(!!photoData.hideGuestGallery);
-          }
-          if (guestFolderId && photoData.folderName) {
-            setGuestFolderName(photoData.folderName);
+        if (targetFolderId === "demo") {
+          setPhotos(DEMO_PHOTOS);
+          setGuestFolderName("Wedding Celebration Demo");
+        } else {
+          const myUploadsParam = encodeURIComponent(JSON.stringify(myUploads));
+          const photoRes = await fetch(`/api/photos?folderId=${targetFolderId}&myUploads=${myUploadsParam}`);
+          if (photoRes.ok) {
+            const photoData = await photoRes.json();
+            setPhotos(photoData.photos || []);
+            if (photoData.hideGuestGallery !== undefined) {
+              setHideGuestGallery(!!photoData.hideGuestGallery);
+            }
+            if (guestFolderId && photoData.folderName) {
+              setGuestFolderName(photoData.folderName);
+            }
+            // Merge co-host capability into status state
+            setStatus(prev => prev ? {
+              ...prev,
+              isHost: photoData.isHost ?? prev.isHost,
+              isCoHost: photoData.isCoHost ?? prev.isCoHost,
+              canEdit: photoData.canEdit ?? prev.canEdit,
+              userRole: photoData.userRole ?? prev.userRole,
+              userEmail: photoData.userEmail ?? prev.userEmail,
+            } : null);
+
+            // If user logged into Google but lacks Editor permission on this Drive folder
+            if (guestFolderId && photoData.userEmail && !photoData.canEdit && !photoData.isHost) {
+              setErrorMsg(`Signed in as ${photoData.userEmail}, but this Google account is not an Editor on this Drive folder. Share the folder with this email in Google Drive to activate Co-Host mode.`);
+            }
           }
         }
       } else {
@@ -778,26 +834,55 @@ export default function App() {
   const handleDisconnect = () => {
     setConfirmDialog({
       isOpen: true,
-      title: "Disconnect Storage?",
-      message: "Are you sure you want to disconnect your Google Drive storage? Disconnecting will prevent guests from viewing the gallery and uploading photos. This does not delete any of your files in Google Drive.",
-      confirmText: "Disconnect",
-      cancelText: "Keep Connected",
+      title: "Sign Out / Disconnect Google Drive?",
+      message: "Are you sure you want to sign out and disconnect Google Drive? This will disconnect the current account and allow you to sign into a different Google account.",
+      confirmText: "Sign Out",
+      cancelText: "Stay Connected",
       isDestructive: true,
       onConfirm: async () => {
         try {
           const res = await fetch("/api/disconnect", { method: "POST" });
           if (res.ok) {
-            setSuccessMsg("Google Drive access has been disconnected.");
+            setSuccessMsg("Signed out successfully. You can now connect a different Google account.");
+            setStatus({ connected: false });
             setPhotos([]);
             setFolders([]);
             sessionStorage.removeItem("photo_deck_folder_clicked");
             setHasClickedFolder(false);
-            fetchStatusAndPhotos();
+            if (guestFolderId) {
+              window.location.href = window.location.origin;
+            } else {
+              fetchStatusAndPhotos();
+            }
           } else {
             setErrorMsg("Failed to disconnect service on server.");
           }
         } catch (err: any) {
           setErrorMsg("Failed to disconnect service.");
+        }
+      }
+    });
+  };
+
+  const handleSwitchAccount = () => {
+    setConfirmDialog({
+      isOpen: true,
+      title: "Switch Google Account?",
+      message: "This will disconnect your current Google account and open Google's account chooser so you can select or sign into a different account.",
+      confirmText: "Switch Account",
+      cancelText: "Cancel",
+      isDestructive: false,
+      onConfirm: async () => {
+        try {
+          await fetch("/api/disconnect", { method: "POST" });
+          setStatus({ connected: false });
+          setPhotos([]);
+          setFolders([]);
+          sessionStorage.removeItem("photo_deck_folder_clicked");
+          setHasClickedFolder(false);
+          await handleAdminAuthRedirect();
+        } catch (err: any) {
+          setErrorMsg("Failed to switch account: " + err.message);
         }
       }
     });
@@ -1298,27 +1383,42 @@ export default function App() {
     if (selectedPhotos.length === 0) return;
 
     setBatchActionLoading(true);
-    setBatchActionLabel("Preparing phone share sheet...");
+    setBatchActionLabel("Preparing to save to Photos...");
     setBatchActionProgress(10);
     setErrorMsg(null);
 
     try {
       const filesList: File[] = [];
       const total = selectedPhotos.length;
+      const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
 
       for (let i = 0; i < total; i++) {
         const photo = selectedPhotos[i];
-        setBatchActionLabel(`Fetching "${photo.name}" (${i + 1}/${total})`);
-        setBatchActionProgress(Math.round(10 + (i / total) * 50));
+        setBatchActionLabel(`Preparing "${photo.name}" (${i + 1}/${total})`);
+        setBatchActionProgress(Math.round(10 + (i / total) * 55));
 
         const response = await fetch(getPhotoViewUrl(photo.id));
-        if (!response.ok) throw new Error(`Failed to load picture item: ${photo.name}`);
+        if (!response.ok) throw new Error(`Failed to load: ${photo.name}`);
         const blob = await response.blob();
 
-        const mimeType = photo.mimeType || blob.type || "image/jpeg";
+        const isVid = photo.mimeType?.startsWith("video/") || photo.name.match(/\.(mov|mp4|m4v|webm|avi|mkv)$/i);
+        let mimeType = photo.mimeType || blob.type || (isVid ? "video/mp4" : "image/jpeg");
         let fileName = photo.name;
+
+        if (isVid) {
+          if (fileName.toLowerCase().endsWith(".mov")) {
+            // iOS Safari strictly requires video/quicktime to show "Save Video" in the native share sheet
+            // Android Chrome prefers video/mp4
+            mimeType = isAndroid ? "video/mp4" : "video/quicktime";
+          } else if (fileName.toLowerCase().endsWith(".mp4")) {
+            mimeType = "video/mp4";
+          }
+        } else if (!mimeType.startsWith("image/")) {
+          mimeType = "image/jpeg";
+        }
+
         if (!fileName.includes(".")) {
-          const ext = mimeType.split("/")[1] || "jpg";
+          const ext = isVid ? (mimeType === "video/quicktime" ? "mov" : "mp4") : (mimeType.split("/")[1] || "jpg");
           fileName = `${fileName}.${ext}`;
         }
 
@@ -1326,23 +1426,35 @@ export default function App() {
         filesList.push(file);
       }
 
-      setBatchActionProgress(75);
-      setBatchActionLabel("Opening native phone share dialog...");
+      setBatchActionProgress(80);
+      setBatchActionLabel("Opening phone share sheet...");
 
       if (navigator.canShare && navigator.canShare({ files: filesList })) {
-        setBatchActionProgress(90);
+        setBatchActionProgress(95);
+        const hasVideos = filesList.some(f => f.type.startsWith("video/") || f.name.match(/\.(mov|mp4)$/i));
+        const hint = hasVideos
+          ? 'Tap "Save Video" in the share sheet to save directly to your Photos library!'
+          : 'Tap "Save Image" in the share sheet to save directly to your Photos library!';
+        setSuccessMsg(hint);
+
         await navigator.share({
           files: filesList,
-          title: "Save Photos to Camera Roll",
-          text: 'Select options like "Save Images" or share directly inside native Photos/Camera Roll.'
+          title: hasVideos ? "Save Video to Photos" : "Save Photos to Library",
+          text: hasVideos
+            ? 'Select "Save Video" to store directly in your Photos / Camera Roll.'
+            : 'Select "Save Image" to store directly in your Photos / Camera Roll.'
         });
-        setSuccessMsg(`Save request completed!`);
+        setSuccessMsg("Save request completed!");
       } else {
-        throw new Error("Local device browser restricts sharing multiple file links.");
+        throw new Error("Local device browser restricts sharing files directly.");
       }
     } catch (err: any) {
+      if (err.name === "AbortError") {
+        // User dismissed the share sheet - don't trigger unwanted fallback downloads
+        return;
+      }
       console.warn("Native phone share sheet was not opened or supported:", err);
-      // Fallback: trigger single download or ZIP download!
+      // Fallback: trigger single download or ZIP download
       if (selectedPhotos.length === 1) {
         const photo = selectedPhotos[0];
         const link = document.createElement("a");
@@ -1353,9 +1465,9 @@ export default function App() {
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        setSuccessMsg("Downloading photo...");
+        setSuccessMsg("Downloading to Files folder...");
       } else {
-        setSuccessMsg("Save dialog unavailable or closed. Converting selection to dynamic ZIP folder...");
+        setSuccessMsg("Direct photo save unavailable. Creating ZIP folder...");
         await downloadSelectedPhotosAsZip(selectedPhotos);
       }
     } finally {
@@ -1563,14 +1675,17 @@ export default function App() {
     setSelectedPhoto(filteredPhotos[targetIndex]);
   };
 
-  // Touch swipe gesture support for mobile lightbox
+  // Touch swipe gesture and tap-to-toggle support for mobile lightbox
   const touchStartXRef = useRef<number | null>(null);
   const touchStartYRef = useRef<number | null>(null);
+  const touchStartTimeRef = useRef<number>(0);
+  const lastTouchToggleTimeRef = useRef<number>(0);
 
   const handleLightboxTouchStart = (e: React.TouchEvent) => {
     if (e.touches.length === 1) {
       touchStartXRef.current = e.touches[0].clientX;
       touchStartYRef.current = e.touches[0].clientY;
+      touchStartTimeRef.current = Date.now();
     }
   };
 
@@ -1581,6 +1696,7 @@ export default function App() {
 
     const deltaX = touchEndX - touchStartXRef.current;
     const deltaY = touchEndY - touchStartYRef.current;
+    const duration = Date.now() - touchStartTimeRef.current;
 
     // Reset touch coordinates
     touchStartXRef.current = null;
@@ -1595,7 +1711,20 @@ export default function App() {
         // Swiped right -> Previous photo
         navigateLightbox("prev");
       }
+      return;
     }
+
+    // Tap detection: minimal movement (< 15px) and short duration (< 400ms)
+    if (Math.abs(deltaX) < 15 && Math.abs(deltaY) < 15 && duration < 400) {
+      lastTouchToggleTimeRef.current = Date.now();
+      setShowControls(prev => !prev);
+    }
+  };
+
+  const handleLightboxClick = () => {
+    // Avoid double toggling when mobile triggers synthetic mouse click after touch
+    if (Date.now() - lastTouchToggleTimeRef.current < 500) return;
+    setShowControls(prev => !prev);
   };
 
   // Keyboard navigation for Lightbox
@@ -2310,7 +2439,7 @@ export default function App() {
               {guestFolderId ? "PhotoDrop Shared" : "PhotoDock"}
             </h1>
             <p className="text-[9px] sm:text-[10px] text-slate-400 dark:text-slate-500 font-bold font-sans mt-0.5 truncate" id="header_sync_text">
-              {guestFolderId ? "Guest View" : "Owner View"}
+              {guestFolderId ? (isCoHost ? "Co-Host View (Editor)" : "Guest View") : "Owner View"}
             </p>
           </div>
         </div>
@@ -2320,10 +2449,28 @@ export default function App() {
 
           {guestFolderId ? (
             <div className="flex items-center gap-1.5 shadow-3xs shrink-0">
-              <span className="hidden xs:flex text-[11px] font-semibold text-slate-850 dark:text-slate-250 bg-slate-105 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-805 px-3 py-1 rounded-full flex items-center gap-1.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-slate-550"></span>
-                Shared Gallery
-              </span>
+              {isCoHost ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-[10.5px] sm:text-[11px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800 px-3 py-1 rounded-full flex items-center gap-1.5 shadow-3xs">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span>Co-Host Mode</span>
+                  </span>
+                  <button
+                    onClick={handleDisconnect}
+                    className="text-[10.5px] sm:text-[11px] font-bold text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/50 border border-red-900 px-2.5 sm:px-3 py-1 rounded-full flex items-center gap-1 transition-all cursor-pointer shadow-3xs"
+                    title="Sign out of Co-Host mode"
+                    id="header_cohost_signout_button"
+                  >
+                    <LogOut className="h-3 w-3" />
+                    <span className="hidden sm:inline">Sign Out</span>
+                  </button>
+                </div>
+              ) : (
+                <span className="hidden xs:flex text-[11px] font-semibold text-slate-850 dark:text-slate-250 bg-slate-105 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-805 px-3 py-1 rounded-full flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-slate-550"></span>
+                  Shared Gallery
+                </span>
+              )}
             </div>
           ) : (
             <>
@@ -2373,6 +2520,15 @@ export default function App() {
                       <Settings className="h-3.5 w-3.5" />
                       <span>Settings</span>
                       <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showAdminGuide ? "rotate-180" : ""}`} />
+                    </button>
+                    <button
+                      onClick={handleDisconnect}
+                      className="text-[10.5px] sm:text-[11px] font-bold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 hover:bg-red-100 dark:hover:bg-red-900/40 border border-red-200 dark:border-red-900 px-2.5 sm:px-3 py-1 rounded-full flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs"
+                      title="Sign out of Google Drive"
+                      id="header_sign_out_button"
+                    >
+                      <LogOut className="h-3 w-3" />
+                      <span className="hidden sm:inline">Sign Out</span>
                     </button>
                   </div>
                 )}
@@ -2762,22 +2918,36 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Account Info and Disconnect */}
+                      {/* Account Info and Sign Out / Switch Account */}
                       <div className="pt-4 border-t border-slate-105 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         <div className="space-y-1">
-                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Connected Account</p>
-                          <p className="text-xs text-slate-600 dark:text-slate-300">{status?.ownerEmail || "Somuchfood789@gmail.com"}</p>
+                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Connected Google Account</p>
+                          <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">{status?.ownerEmail || "Google Drive Connected"}</p>
                         </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDisconnect();
-                          }}
-                          className="text-xs font-bold text-red-650 bg-red-50 hover:bg-red-100 border border-red-150 px-5 py-2.5 rounded-full transition-all cursor-pointer"
-                          id="disconnect_account_button"
-                        >
-                          Disconnect Google Drive
-                        </button>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSwitchAccount();
+                            }}
+                            className="text-xs font-bold text-indigo-650 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 border border-indigo-150 dark:border-indigo-800 px-4 py-2.5 rounded-full transition-all cursor-pointer flex items-center gap-1.5"
+                            id="switch_account_settings_button"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            <span>Switch Account</span>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDisconnect();
+                            }}
+                            className="text-xs font-bold text-red-650 dark:text-red-400 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/50 border border-red-150 dark:border-red-900 px-4 py-2.5 rounded-full transition-all cursor-pointer flex items-center gap-1.5"
+                            id="disconnect_account_button"
+                          >
+                            <LogOut className="h-3.5 w-3.5" />
+                            <span>Sign Out</span>
+                          </button>
+                        </div>
                       </div>
 
                     </div>
@@ -3316,16 +3486,16 @@ export default function App() {
                           <p className="text-[9px] text-[#ffffff]/70 font-semibold font-mono tracking-wider mt-0.5 uppercase">
                             {uploaderName
                               ? `Posted by ${uploaderName}`
-                              : `${formatFileSize(photo.size) || "Image"} • ${isMyUpload ? "Your Drop" : (isOwner ? "Guest Upload" : "Guest")}`
+                              : `${formatFileSize(photo.size) || "Image"} • ${isMyUpload ? "Your Drop" : (canModerate ? "Guest Upload" : "Guest")}`
                             }
                           </p>
                         </div>
 
-                        {(isMyUpload || isOwner) && (
+                        {(isMyUpload || canModerate) && (
                           <button
                             onClick={() => handleTrashPhoto(photo.id, photo.name)}
                             className="p-1.5 bg-white/10 hover:bg-red-500 hover:text-white rounded-lg transition-colors text-white text-xs mt-auto shrink-0 cursor-pointer"
-                            title={isOwner ? "Delete this photo" : "Trash/Delete my accidental drop"}
+                            title={canModerate ? "Delete this photo (Host Moderation)" : "Trash/Delete my accidental drop"}
                             id={`trash_button_${photo.id}`}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
@@ -3418,37 +3588,44 @@ export default function App() {
         )}
       </main>
 
-      {/* FULLSCREEN PREVIEW LIGHTBOX WITH TOUCH/LEFT/RIGHT NAVIGATION controls */}
+      {/* FULLSCREEN PREVIEW LIGHTBOX WITH TOUCH SWIPE & TRANSLUCENT CONTROLS */}
       <AnimatePresence>
         {selectedPhoto && (
           <div
-            className="fixed inset-0 z-50 flex flex-col items-center justify-center p-4 bg-white/98 dark:bg-slate-950/98 backdrop-blur-md transition-colors select-none touch-pan-y"
+            className="fixed inset-0 z-50 w-full h-[100dvh] bg-black flex items-center justify-center overflow-hidden select-none touch-pan-y"
             id="lightbox_modal"
             role="dialog"
             aria-modal="true"
             onTouchStart={handleLightboxTouchStart}
             onTouchEnd={handleLightboxTouchEnd}
+            onClick={handleLightboxClick}
           >
-            {/* Top Close Actions Row */}
-            <div className="w-full max-w-5xl flex justify-between items-center mb-6 z-55 px-3">
-              <div className="flex items-center gap-2 min-w-0 flex-1">
-                <span className="text-[11px] font-bold font-mono text-slate-500 dark:text-slate-400 uppercase tracking-wider truncate max-w-xs md:max-w-md" title={selectedPhoto.name}>
-                  {(() => {
-                    const n = parseUploaderName(selectedPhoto.name);
-                    return n ? selectedPhoto.name.replace(`${n} - `, "") : selectedPhoto.name;
-                  })()}
-                </span>
-                <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-900 rounded-md text-[9px] font-bold font-mono text-slate-400 dark:text-slate-500 uppercase shrink-0">
-                  {formatFileSize(selectedPhoto.size)}
-                </span>
+            {/* Top Translucent Floating Header */}
+            <div
+              className={`absolute top-0 inset-x-0 z-50 p-3 sm:p-4 pt-4 sm:pt-6 flex items-center justify-between pointer-events-none transition-all duration-300 bg-gradient-to-b from-black/80 via-black/40 to-transparent ${
+                showControls ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-4 pointer-events-none"
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0 max-w-[75%]">
+                {/* Photo Counter Pill */}
                 {filteredPhotos.length > 1 && (
-                  <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-900 rounded-md text-[9px] font-bold font-mono text-slate-500 dark:text-slate-400 shrink-0">
-                    {filteredPhotos.findIndex(p => p.id === selectedPhoto.id) + 1} / {filteredPhotos.length}
+                  <span className="pointer-events-auto px-3 py-1 bg-black/60 backdrop-blur-md border border-white/15 rounded-full text-[11px] font-bold font-mono text-white/90 shadow-lg shrink-0">
+                    {filteredPhotos.findIndex((p) => p.id === selectedPhoto.id) + 1} / {filteredPhotos.length}
                   </span>
                 )}
+
+                {/* File size pill */}
+                {selectedPhoto.size && (
+                  <span className="pointer-events-auto hidden sm:inline-block px-2.5 py-1 bg-black/60 backdrop-blur-md border border-white/15 rounded-full text-[10px] font-mono text-white/70 shadow-lg shrink-0">
+                    {formatFileSize(selectedPhoto.size)}
+                  </span>
+                )}
+
+                {/* Uploader badge */}
                 {parseUploaderName(selectedPhoto.name) && (
                   <button
-                    onClick={() => {
+                    onClick={(e) => {
+                      e.stopPropagation();
                       const uploader = parseUploaderName(selectedPhoto.name);
                       if (uploader) {
                         setSelectedUploader(uploader);
@@ -3456,120 +3633,228 @@ export default function App() {
                       }
                     }}
                     title={`View all photos posted by ${parseUploaderName(selectedPhoto.name)}`}
-                    className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/80 text-indigo-600 dark:text-indigo-400 text-[10px] font-bold border border-indigo-100 dark:border-indigo-900 transition-colors cursor-pointer shrink-0"
+                    className="pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 hover:bg-black/80 backdrop-blur-md border border-white/15 text-indigo-300 hover:text-indigo-200 text-[11px] font-semibold transition-all cursor-pointer truncate shadow-lg"
                   >
-                    <Users className="h-3 w-3" />
-                    Posted by {parseUploaderName(selectedPhoto.name)}
+                    <Users className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{parseUploaderName(selectedPhoto.name)}</span>
                   </button>
                 )}
               </div>
+
+              {/* Close Button */}
               <button
-                onClick={() => setSelectedPhoto(null)}
-                className="bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 p-2.5 rounded-full transition-all cursor-pointer"
-                aria-label="Close modal dialog"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedPhoto(null);
+                }}
+                className="pointer-events-auto bg-black/60 hover:bg-black/80 active:scale-95 text-white/90 hover:text-white p-2.5 rounded-full border border-white/15 backdrop-blur-md transition-all cursor-pointer shadow-lg"
+                aria-label="Close full screen view"
               >
-                <X className="h-4.5 w-4.5" />
+                <X className="h-5 w-5" />
               </button>
             </div>
 
-            {/* Middle Main Slider with navigation arrows */}
-            <div className="max-w-5xl w-full flex-1 flex items-center justify-between xl:gap-8 relative" id="lightbox_slider_body">
-
-              {/* Previous button */}
+            {/* Floating Desktop Navigation Chevrons */}
+            <div
+              className={`hidden md:block transition-all duration-300 ${
+                showControls ? "opacity-100" : "opacity-0 pointer-events-none"
+              }`}
+            >
               <button
-                onClick={() => navigateLightbox("prev")}
-                className="hidden md:flex bg-slate-100 hover:bg-slate-250 text-slate-800 p-3.5 rounded-full transition-all shrink-0 active:scale-90"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigateLightbox("prev");
+                }}
+                className="absolute left-6 top-1/2 -translate-y-1/2 z-50 bg-black/60 hover:bg-black/80 text-white/90 hover:text-white p-4 rounded-full border border-white/15 backdrop-blur-md transition-all shrink-0 active:scale-90 shadow-2xl cursor-pointer pointer-events-auto"
                 title="Browse Previous"
                 aria-label="Previous Photo"
               >
-                <ChevronLeft className="h-5 w-5" />
+                <ChevronLeft className="h-6 w-6" />
               </button>
-
-              {/* Main Image Viewport with swipe gesture recognition & smooth animation */}
-              <div className="flex-1 max-h-[70vh] flex items-center justify-center relative rounded-3xl overflow-hidden px-4">
-                <motion.div
-                  key={selectedPhoto.id}
-                  initial={{ opacity: 0, scale: 0.97 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.97 }}
-                  transition={{ duration: 0.18, ease: "easeOut" }}
-                  className="w-full h-full flex items-center justify-center"
-                >
-                  {selectedPhoto.mimeType?.startsWith("video/") ? (
-                    <video
-                      src={getLightboxPhotoSrc(selectedPhoto)}
-                      controls
-                      autoPlay
-                      playsInline
-                      className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50"
-                      id="lightbox_active_video"
-                    />
-                  ) : (
-                    <img
-                      src={getLightboxPhotoSrc(selectedPhoto)}
-                      alt={selectedPhoto.name}
-                      referrerPolicy="no-referrer"
-                      draggable={false}
-                      className="max-w-full max-h-[70vh] object-contain rounded-2xl border border-slate-150 shadow-md bg-slate-50/50 select-none pointer-events-none"
-                      id="lightbox_active_image"
-                    />
-                  )}
-                </motion.div>
-              </div>
-
-              {/* Next button */}
               <button
-                onClick={() => navigateLightbox("next")}
-                className="hidden md:flex bg-slate-100 hover:bg-slate-250 text-slate-800 p-3.5 rounded-full transition-all shrink-0 active:scale-90"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigateLightbox("next");
+                }}
+                className="absolute right-6 top-1/2 -translate-y-1/2 z-50 bg-black/60 hover:bg-black/80 text-white/90 hover:text-white p-4 rounded-full border border-white/15 backdrop-blur-md transition-all shrink-0 active:scale-90 shadow-2xl cursor-pointer pointer-events-auto"
                 title="Browse Next"
                 aria-label="Next Photo"
               >
-                <ChevronRight className="h-5 w-5" />
+                <ChevronRight className="h-6 w-6" />
               </button>
-
             </div>
 
-            {/* Bottom Panel buttons and file detail */}
-            <div className="mt-6 flex flex-col items-center gap-3">
+            {/* Center Stage: Fullscreen Edge-to-Edge Media Display */}
+            <div className="w-full h-full flex items-center justify-center relative p-0 sm:p-2 md:p-4" id="lightbox_slider_body">
+              <motion.div
+                key={selectedPhoto.id}
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.98 }}
+                transition={{ duration: 0.18, ease: "easeOut" }}
+                className="w-full h-full flex items-center justify-center"
+              >
+                {selectedPhoto.mimeType?.startsWith("video/") || selectedPhoto.name.match(/\.(mov|mp4|m4v|webm|avi|mkv)$/i) ? (
+                  <div className="relative max-w-full max-h-full flex items-center justify-center">
+                    {useDrivePlayer ? (
+                      <div
+                        className="w-[92vw] sm:w-[85vw] max-w-4xl h-[65vh] sm:h-[75vh] flex flex-col items-center justify-center relative rounded-2xl overflow-hidden shadow-2xl bg-black border border-white/20"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <iframe
+                          src={`https://drive.google.com/file/d/${selectedPhoto.id}/preview`}
+                          className="w-full h-full border-0 rounded-2xl"
+                          allow="autoplay; encrypted-media; fullscreen"
+                          allowFullScreen
+                          title={selectedPhoto.name}
+                        />
+                        <div className="absolute top-3 right-3 flex items-center gap-2 z-10">
+                          <button
+                            onClick={() => setUseDrivePlayer(false)}
+                            className="px-3 py-1.5 bg-black/80 hover:bg-black text-white/90 hover:text-white text-[11px] font-semibold rounded-full border border-white/25 transition-all flex items-center gap-1.5 shadow-lg active:scale-95 cursor-pointer backdrop-blur-md"
+                          >
+                            <span>Switch to Native Player</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : !videoError ? (
+                      <div className="relative flex items-center justify-center">
+                        <video
+                          key={selectedPhoto.id}
+                          src={getLightboxPhotoSrc(selectedPhoto)}
+                          controls
+                          playsInline
+                          preload="auto"
+                          className="max-w-full max-h-[85vh] w-auto h-auto object-contain shadow-2xl rounded-2xl"
+                          id="lightbox_active_video"
+                          onClick={(e) => e.stopPropagation()}
+                          onError={() => {
+                            setVideoError(true);
+                            fetch(`/api/photos/ensure-permission/${selectedPhoto.id}`, { method: "POST" }).catch(() => {});
+                          }}
+                        >
+                          Your browser does not support playing this video directly.
+                        </video>
+                        {/* Option to switch to Drive Player */}
+                        <div className="absolute top-2 right-2 flex items-center gap-2 z-10 pointer-events-auto">
+                          <button
+                            onClick={() => {
+                              fetch(`/api/photos/ensure-permission/${selectedPhoto.id}`, { method: "POST" }).catch(() => {});
+                              setUseDrivePlayer(true);
+                            }}
+                            className="px-3 py-1.5 bg-black/60 hover:bg-black/80 backdrop-blur-md text-white/80 hover:text-white text-[11px] font-medium rounded-full border border-white/20 transition-all flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+                            title="Play using Google Drive web player"
+                          >
+                            <Play className="h-3 w-3 text-emerald-400 fill-emerald-400" />
+                            <span>Drive Player</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className="p-6 sm:p-8 max-w-md mx-4 bg-slate-900/95 backdrop-blur-2xl border border-white/20 rounded-3xl text-center flex flex-col items-center gap-4 shadow-2xl z-20"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="w-14 h-14 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center border border-amber-500/30">
+                          <AlertCircle className="h-7 w-7" />
+                        </div>
+                        <div>
+                          <h3 className="text-white font-bold text-base mb-1">
+                            Play in Google Drive Player
+                          </h3>
+                          <p className="text-white/70 text-xs leading-relaxed">
+                            This video format is optimized for Google Drive web streaming. Click below to stream smoothly.
+                          </p>
+                        </div>
+                        <div className="flex flex-col sm:flex-row gap-2.5 w-full pt-1">
+                          <button
+                            onClick={() => {
+                              fetch(`/api/photos/ensure-permission/${selectedPhoto.id}`, { method: "POST" }).catch(() => {});
+                              setUseDrivePlayer(true);
+                              setVideoError(false);
+                            }}
+                            className="flex-1 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-full transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95 cursor-pointer"
+                          >
+                            <Play className="h-4 w-4 fill-white" />
+                            <span>Play in Drive Player</span>
+                          </button>
+                          <button
+                            onClick={() => shareSelectedPhotosToPhone([selectedPhoto])}
+                            className="flex-1 px-4 py-2.5 bg-white text-black font-bold text-xs rounded-full hover:bg-white/90 transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95 cursor-pointer"
+                          >
+                            <Download className="h-4 w-4" />
+                            <span>Save to Photos</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <img
+                    src={getLightboxPhotoSrc(selectedPhoto)}
+                    alt={selectedPhoto.name}
+                    referrerPolicy="no-referrer"
+                    draggable={false}
+                    className="max-w-full max-h-full w-auto h-auto object-contain select-none pointer-events-none shadow-2xl"
+                    id="lightbox_active_image"
+                  />
+                )}
+              </motion.div>
+            </div>
 
-              {/* Quick actions row */}
-              <div className="flex flex-wrap items-center gap-2">
-
-                {/* Mobile inline arrows navigation comfort */}
-                <div className="flex md:hidden bg-slate-100 p-1.5 rounded-full mb-1">
+            {/* Bottom Translucent Floating Action Dock */}
+            <div
+              className={`absolute bottom-0 inset-x-0 z-50 p-4 pb-6 sm:pb-8 flex flex-col items-center gap-2 pointer-events-none transition-all duration-300 bg-gradient-to-t from-black/85 via-black/40 to-transparent ${
+                showControls ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4 pointer-events-none"
+              }`}
+            >
+              <div
+                className="pointer-events-auto flex items-center gap-2 p-1.5 px-2 bg-black/65 backdrop-blur-xl border border-white/20 rounded-full shadow-2xl"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* Mobile Navigation inline buttons */}
+                <div className="flex md:hidden items-center border-r border-white/15 pr-1 mr-0.5">
                   <button
                     onClick={() => navigateLightbox("prev")}
-                    className="p-1 px-3 text-slate-600 hover:text-slate-900 border-r border-slate-200"
+                    className="p-2 text-white/80 hover:text-white active:scale-90 transition-transform"
+                    aria-label="Previous image"
                   >
                     <ChevronLeft className="h-4.5 w-4.5" />
                   </button>
                   <button
                     onClick={() => navigateLightbox("next")}
-                    className="p-1 px-3 text-slate-600 hover:text-slate-900"
+                    className="p-2 text-white/80 hover:text-white active:scale-90 transition-transform"
+                    aria-label="Next image"
                   >
                     <ChevronRight className="h-4.5 w-4.5" />
                   </button>
                 </div>
 
-                {(myUploads.includes(selectedPhoto.id) || isOwner) && (
+                {/* Delete button (owner, co-host, or uploader) */}
+                {(myUploads.includes(selectedPhoto.id) || canModerate) && (
                   <button
                     onClick={() => handleTrashPhoto(selectedPhoto.id, selectedPhoto.name)}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-full shadow-xs transition-all active:scale-95 cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-red-600/85 hover:bg-red-600 text-white font-semibold text-xs rounded-full transition-all active:scale-95 cursor-pointer shadow-sm"
                     id="lightbox_trash_button"
+                    title={canModerate ? "Delete Photo (Host Moderation)" : "Delete Photo"}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
-                    <span>{isOwner && !myUploads.includes(selectedPhoto.id) ? "Delete Photo" : "Delete my photo"}</span>
+                    <span className="hidden sm:inline">
+                      {canModerate && !myUploads.includes(selectedPhoto.id) ? "Delete" : "Delete mine"}
+                    </span>
                   </button>
                 )}
 
+                {/* Primary Action: Save to Photos Library (Phone native Share sheet) or Direct Download (Desktop) */}
                 {typeof navigator !== "undefined" && navigator.share ? (
                   <button
                     onClick={() => shareSelectedPhotosToPhone([selectedPhoto])}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-850 text-white font-bold text-xs rounded-full shadow-xs transition-all cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-4.5 py-2 bg-white text-black font-bold text-xs rounded-full hover:bg-white/90 transition-all active:scale-95 cursor-pointer shadow-lg"
                     id="lightbox_share_button"
+                    title={selectedPhoto.mimeType?.startsWith("video/") || selectedPhoto.name.match(/\.(mov|mp4)$/i) ? "Save video directly to Photos app" : "Save photo directly to Photos app"}
                   >
-                    <span className="md:hidden">Save Image</span>
-                    <span className="hidden md:inline">Save / Share</span>
+                    <Download className="h-3.5 w-3.5 stroke-[2.5]" />
+                    <span>Save to Photos</span>
                   </button>
                 ) : (
                   <a
@@ -3577,17 +3862,35 @@ export default function App() {
                     download={selectedPhoto.name}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-850 text-white font-bold text-xs rounded-full shadow-xs transition-all"
+                    className="inline-flex items-center gap-1.5 px-4.5 py-2 bg-white text-black font-bold text-xs rounded-full hover:bg-white/90 transition-all active:scale-95 shadow-lg"
                     id="lightbox_download_link"
+                    title="Download Original"
                   >
-                    <span className="md:hidden">Save Image</span>
-                    <span className="hidden md:inline">Download</span>
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Download</span>
+                  </a>
+                )}
+
+                {/* Secondary Option: Download to Files (when Web Share is available) */}
+                {typeof navigator !== "undefined" && navigator.share && (
+                  <a
+                    href={getPhotoViewUrl(selectedPhoto.id)}
+                    download={selectedPhoto.name}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-white/15 hover:bg-white/25 text-white/90 hover:text-white font-medium text-xs rounded-full border border-white/20 transition-all active:scale-95 shadow-sm"
+                    id="lightbox_download_link"
+                    title="Download raw file to Files folder"
+                  >
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">Files</span>
                   </a>
                 )}
               </div>
 
-              <div className="text-[10px] text-slate-400 font-mono text-center">
-                Use Left / Right arrow keys to cycle images dynamically (Esc to close)
+              {/* Tap / Swipe Hint */}
+              <div className="text-[10px] text-white/50 font-mono tracking-wide">
+                Swipe or tap screen to toggle view
               </div>
             </div>
 
@@ -3638,20 +3941,20 @@ export default function App() {
             {/* Actions list */}
             <div className="flex items-center gap-2 w-full md:w-auto justify-end">
               {/* Trash option for photos inside selection */}
-              {(isOwner ? selectedPhotoIds.length > 0 : selectedPhotoIds.some(id => myUploads.includes(id))) && (
+              {(canModerate ? selectedPhotoIds.length > 0 : selectedPhotoIds.some(id => myUploads.includes(id))) && (
                 <button
                   onClick={() => {
-                    const delets = isOwner
+                    const delets = canModerate
                       ? selectedPhotoIds
                       : selectedPhotoIds.filter(id => myUploads.includes(id));
                     handleTrashMultiplePhotos(delets);
                   }}
                   className="px-3.5 py-2.5 bg-red-50 hover:bg-red-100 text-red-600 font-bold text-xs rounded-2xl transition-all cursor-pointer flex items-center gap-1.5 shadow-3xs"
-                  title={isOwner ? "Delete selected photos from Drive" : "Trash selected photos uploaded by me"}
+                  title={canModerate ? "Delete selected photos from Drive (Host Moderation)" : "Trash selected photos uploaded by me"}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   <span className="hidden sm:inline">
-                    {isOwner
+                    {canModerate
                       ? `Delete Selected (${selectedPhotoIds.length})`
                       : `Delete Ours (${selectedPhotoIds.filter(id => myUploads.includes(id)).length})`
                     }
@@ -3680,11 +3983,11 @@ export default function App() {
                   shareSelectedPhotosToPhone(items);
                 }}
                 className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-400 text-white font-bold text-xs rounded-2xl transition-all cursor-pointer flex items-center gap-1.5 shadow-3xs"
-                title="Save photos directly to iOS / Android Camera Roll"
+                title="Save photos and videos directly to iOS / Android Photo Library"
               >
                 <CheckCircle className="h-3.5 w-3.5 text-emerald-400" strokeWidth={3} />
-                <span className="md:hidden">Save to Phone</span>
-                <span className="hidden md:inline">Download</span>
+                <span className="md:hidden">Save to Photos</span>
+                <span className="hidden md:inline">Save to Photos</span>
               </button>
             </div>
           </motion.div>
@@ -3990,22 +4293,37 @@ export default function App() {
       </AnimatePresence>
 
       {/* APPLE PHOTO FOOTER COUNTER SUMMARY */}
-      {!guestFolderId && (
-        <footer className="border-t border-slate-200 dark:border-slate-900 bg-white dark:bg-[#0b0f19] mt-12 py-10 text-[11px] text-slate-400 dark:text-slate-500" id="app_footer">
-          <div className="max-w-6xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="space-y-1 text-center sm:text-left">
-              <p className="font-bold text-slate-900 dark:text-slate-300 uppercase font-mono tracking-wider">
-                {photos.length} Photos Summary &bull; Size: {formatFileSize(String(totalPhotosSize)) || "0 KB"}
-              </p>
-              <p className="text-slate-450 dark:text-slate-500 font-medium">Anyone can upload — no account needed!</p>
-            </div>
-
-            <div className="text-xs text-slate-400 dark:text-slate-550 font-bold font-sans">
-              <span>Powered by PhotoDock</span>
-            </div>
+      <footer className="border-t border-slate-200 dark:border-slate-900 bg-white dark:bg-[#0b0f19] mt-12 py-10 text-[11px] text-slate-400 dark:text-slate-500" id="app_footer">
+        <div className="max-w-6xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="space-y-1 text-center sm:text-left">
+            <p className="font-bold text-slate-900 dark:text-slate-300 uppercase font-mono tracking-wider">
+              {photos.length} Photos Summary &bull; Size: {formatFileSize(String(totalPhotosSize)) || "0 KB"}
+            </p>
+            <p className="text-slate-450 dark:text-slate-500 font-medium">Anyone can upload — no account needed!</p>
           </div>
-        </footer>
-      )}
+
+          <div className="flex items-center gap-3 text-xs text-slate-400 dark:text-slate-550 font-bold font-sans">
+            {guestFolderId && !canModerate && (
+              <button
+                onClick={handleAdminAuthRedirect}
+                className="text-[11px] text-slate-500 hover:text-slate-300 transition-colors flex items-center gap-1 cursor-pointer"
+                title="Sign in with Google to activate Co-Host moderation if this folder is shared with you as an Editor"
+                id="footer_cohost_login_btn"
+              >
+                <Lock className="h-3 w-3 text-slate-500" />
+                <span>Host / Co-Host Access</span>
+              </button>
+            )}
+            {guestFolderId && isCoHost && (
+              <span className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
+                <CheckCircle className="h-3 w-3 text-emerald-400" />
+                <span>Co-Host Mode Active</span>
+              </span>
+            )}
+            <span>Powered by PhotoDock</span>
+          </div>
+        </div>
+      </footer>
 
       {/* FLOATING ADD PHOTOS BUTTON FOR GUESTS ONLY */}
       {guestFolderId && (

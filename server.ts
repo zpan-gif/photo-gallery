@@ -65,6 +65,15 @@ interface SavedCredentials {
   hideGuestGallery?: boolean;
 }
 
+// Helper to read header values whether headers is a standard Headers object or plain object
+function getResponseHeader(headers: any, name: string): string | null {
+  if (!headers) return null;
+  if (typeof headers.get === "function") {
+    return headers.get(name) || headers.get(name.toLowerCase());
+  }
+  return headers[name] || headers[name.toLowerCase()] || null;
+}
+
 // Fast In-Memory Credentials Cache to eliminate Firestore roundtrip latency during batch uploads
 const sessionCredentialsCache = new Map<string, { data: SavedCredentials; expires: number }>();
 const folderCredentialsCache = new Map<string, { data: SavedCredentials; expires: number }>();
@@ -78,8 +87,7 @@ async function getSavedCredentials(sessionId: string): Promise<SavedCredentials 
   }
 
   if (!db) {
-    console.error("Firebase Firestore is not initialized.");
-    return null;
+    return getFileFallbackCredentials();
   }
   try {
     const doc = await db.collection("sessions").doc(sessionId).get();
@@ -94,18 +102,36 @@ async function getSavedCredentials(sessionId: string): Promise<SavedCredentials 
   } catch (e) {
     console.error("Error reading saved credentials from Firestore:", e);
   }
+  return getFileFallbackCredentials();
+}
+
+// Fallback to local drive-credentials.json if Firestore does not contain credentials
+function getFileFallbackCredentials(): SavedCredentials | null {
+  const filePath = path.join(process.cwd(), "drive-credentials.json");
+  if (fs.existsSync(filePath)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      if (data && data.refreshToken) return data;
+    } catch (e) {}
+  }
   return null;
 }
 
-// Save credentials safely to Firestore
+// Save credentials safely to Firestore and local fallback
 async function saveCredentials(sessionId: string, creds: SavedCredentials) {
   sessionCredentialsCache.set(sessionId, { data: creds, expires: Date.now() + CACHE_TTL_MS });
   if (creds.folderId) {
     folderCredentialsCache.set(creds.folderId, { data: creds, expires: Date.now() + CACHE_TTL_MS });
   }
 
+  try {
+    const filePath = path.join(process.cwd(), "drive-credentials.json");
+    fs.writeFileSync(filePath, JSON.stringify(creds, null, 2));
+  } catch (e) {
+    console.error("Error writing fallback credentials:", e);
+  }
+
   if (!db) {
-    console.error("Firebase Firestore is not initialized.");
     return;
   }
   try {
@@ -115,7 +141,7 @@ async function saveCredentials(sessionId: string, creds: SavedCredentials) {
   }
 }
 
-// Delete credentials (disconnect)
+// Delete credentials (disconnect / sign out)
 async function deleteCredentials(sessionId: string) {
   const cached = sessionCredentialsCache.get(sessionId);
   if (cached?.data?.folderId) {
@@ -123,8 +149,17 @@ async function deleteCredentials(sessionId: string) {
   }
   sessionCredentialsCache.delete(sessionId);
 
+  // Clear fallback credentials file so disconnected state takes effect
+  const filePath = path.join(process.cwd(), "drive-credentials.json");
+  if (fs.existsSync(filePath)) {
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {
+      console.error("Error unlinking local fallback credentials:", e);
+    }
+  }
+
   if (!db) {
-    console.error("Firebase Firestore is not initialized.");
     return;
   }
   try {
@@ -143,6 +178,10 @@ async function getSavedCredentialsForFolder(folderId: string): Promise<SavedCred
 
   if (!db) {
     console.error("Firebase Firestore is not initialized.");
+    const fileCreds = getFileFallbackCredentials();
+    if (fileCreds && (!fileCreds.folderId || fileCreds.folderId === folderId)) {
+      return fileCreds;
+    }
     return null;
   }
   try {
@@ -154,6 +193,10 @@ async function getSavedCredentialsForFolder(folderId: string): Promise<SavedCred
     }
   } catch (e) {
     console.error("Error querying credentials for folder in Firestore:", e);
+  }
+  const fileCreds = getFileFallbackCredentials();
+  if (fileCreds && (!fileCreds.folderId || fileCreds.folderId === folderId)) {
+    return fileCreds;
   }
   return null;
 }
@@ -326,11 +369,43 @@ app.get("/api/status", async (req, res) => {
     }
   }
 
+  const queryFolderId = req.query.folderId as string;
+  const targetFolderId = queryFolderId || creds?.folderId;
+  let canEdit = false;
+  let userRole = "guest";
+  let isCoHost = false;
+
+  if (targetFolderId && creds && creds.refreshToken) {
+    try {
+      const drive = getAuthorizedDriveClient(creds);
+      const folderCheck = await drive.files.get({
+        fileId: targetFolderId,
+        fields: "capabilities(canEdit, canDelete, canAddChildren), owners",
+      });
+      const caps = folderCheck.data.capabilities;
+      if (caps?.canEdit || caps?.canDelete || caps?.canAddChildren) {
+        canEdit = true;
+        const isOwnerAccount = folderCheck.data.owners?.some(
+          (o: any) => o.emailAddress?.toLowerCase() === ownerEmail?.toLowerCase()
+        );
+        userRole = isOwnerAccount ? "owner" : "editor";
+        isCoHost = !isOwnerAccount;
+      }
+    } catch (e) {
+      console.warn("Folder permission capability check note:", e);
+    }
+  }
+
   res.json({
     connected: !!(creds && creds.refreshToken),
     folderId: creds ? creds.folderId : null,
     folderName: creds ? (creds.folderName || "App Uploads Gallery") : null,
     ownerEmail: ownerEmail || null,
+    userEmail: ownerEmail || null,
+    canEdit,
+    isHost: canEdit || userRole === "owner",
+    isCoHost,
+    userRole,
     envConfigured: clientIdConfigured && clientSecretConfigured,
     storageQuota,
     missingEnv: {
@@ -385,7 +460,7 @@ app.get("/api/auth/url", (req, res) => {
 
     const url = oauth2Client.generateAuthUrl({
       access_type: "offline",
-      prompt: "consent", // Necessary to guarantee a refresh_token is returned
+      prompt: "consent select_account", // Force Google Account Chooser so user can sign into different accounts
       scope: scopes,
       state: finalState
     });
@@ -578,7 +653,8 @@ app.get("/api/oauth/callback", async (req, res) => {
 app.post("/api/disconnect", async (req, res) => {
   const sessionId = (req as any).sessionId;
   await deleteCredentials(sessionId);
-  res.json({ success: true });
+  res.clearCookie("session_id");
+  res.json({ success: true, connected: false });
 });
 
 // 5. Gallery Photo Listing
@@ -612,8 +688,31 @@ app.get("/api/photos", async (req, res) => {
 
     const drive = getAuthorizedDriveClient(creds);
     
-    // Check if the current session is the owner/host of this folder
-    const isOwner = !!(ownerCreds && ownerCreds.refreshToken && ownerCreds.folderId === folderId);
+    // Check if the current session is the owner/host of this folder, or a shared co-host (canEdit)
+    let isOwner = !!(ownerCreds && ownerCreds.refreshToken && ownerCreds.folderId === folderId);
+    let canEdit = isOwner;
+    let userRole = isOwner ? "owner" : "guest";
+    let isCoHost = false;
+
+    if (!isOwner && ownerCreds && ownerCreds.refreshToken) {
+      try {
+        const userDrive = getAuthorizedDriveClient(ownerCreds);
+        const folderCheck = await userDrive.files.get({
+          fileId: folderId,
+          fields: "capabilities(canEdit, canDelete, canAddChildren), owners",
+        });
+        const caps = folderCheck.data.capabilities;
+        if (caps?.canEdit || caps?.canDelete || caps?.canAddChildren) {
+          canEdit = true;
+          isCoHost = true;
+          userRole = "editor";
+        }
+      } catch (e) {
+        // Folder not shared with user or insufficient permissions
+      }
+    }
+
+    const isHostOrCoHost = isOwner || canEdit;
 
     // If a custom folderId is specified, fetch its metadata to get the name
     let folderName = creds.folderName || "App Uploads Gallery";
@@ -640,8 +739,8 @@ app.get("/api/photos", async (req, res) => {
     let allFiles = driveRes.data.files || [];
     const hideGuestGallery = !!creds.hideGuestGallery;
 
-    // If Private Guest Mode is active AND caller is a guest (not owner)
-    if (hideGuestGallery && !isOwner) {
+    // If Private Guest Mode is active AND caller is a guest (not owner or co-host)
+    if (hideGuestGallery && !isHostOrCoHost) {
       allFiles = allFiles.filter(file => file.id && myUploadIds.includes(file.id));
     }
 
@@ -650,7 +749,13 @@ app.get("/api/photos", async (req, res) => {
       folderId: folderId,
       folderName: folderName,
       hideGuestGallery: hideGuestGallery,
-      photos: allFiles
+      photos: allFiles,
+      isOwner: isOwner,
+      isHost: isHostOrCoHost,
+      isCoHost: isCoHost,
+      canEdit: canEdit,
+      userRole: userRole,
+      userEmail: ownerCreds?.ownerEmail || null,
     });
   } catch (err: any) {
     console.error("Error querying gallery photo list:", err);
@@ -667,8 +772,21 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
   // 1. Instant local playback if recently uploaded (bypasses Google Drive 10s processing delay)
   const cached = recentUploadsCache.get(fileId);
   if (cached && fs.existsSync(cached.path) && cached.expires > Date.now()) {
-    res.setHeader("Content-Type", cached.mimeType);
+    let mimeType = cached.mimeType;
+    const userAgent = (req.headers["user-agent"] || "").toLowerCase();
+    const isAppleDevice = /iphone|ipad|ipod|macintosh|mac os/i.test(userAgent);
+
+    // Apple devices (iPhone/Safari) strictly require video/quicktime to use Apple hardware decoders
+    // Non-Apple browsers (Chrome, Android) require video/mp4
+    if (mimeType === "video/quicktime") {
+      mimeType = isAppleDevice ? "video/quicktime" : "video/mp4";
+    }
+
+    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Cache-Control", "public, max-age=3600");
+
     const stat = fs.statSync(cached.path);
     const fileSize = stat.size;
     const range = req.headers.range;
@@ -677,18 +795,23 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
       const parts = range.replace(/bytes=/, "").split("-");
       const start = parseInt(parts[0], 10);
       const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+      if (isNaN(start) || start >= fileSize || start > end) {
+        res.setHeader("Content-Range", `bytes */${fileSize}`);
+        return res.status(416).end();
+      }
+
       const chunksize = (end - start) + 1;
       const file = fs.createReadStream(cached.path, { start, end });
       res.writeHead(206, {
         "Content-Range": `bytes ${start}-${end}/${fileSize}`,
         "Accept-Ranges": "bytes",
         "Content-Length": chunksize,
-        "Content-Type": cached.mimeType,
+        "Content-Type": mimeType,
       });
       return file.pipe(res);
     } else {
       res.setHeader("Content-Length", fileSize);
-      res.setHeader("Accept-Ranges", "bytes");
       return fs.createReadStream(cached.path).pipe(res);
     }
   }
@@ -704,17 +827,34 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
     }
     const drive = getAuthorizedDriveClient(creds);
 
-    let mimeType = fileMimeCache.get(fileId)?.mimeType;
+    let cachedInfo = fileMimeCache.get(fileId);
+    let mimeType = cachedInfo?.mimeType;
     if (!mimeType) {
       const metadata = await drive.files.get({
         fileId,
         fields: "mimeType, name",
       });
+      const fileName = metadata.data.name || "";
       mimeType = metadata.data.mimeType || "image/jpeg";
+      if (fileName.toLowerCase().endsWith(".mov") || mimeType === "video/quicktime") {
+        mimeType = "video/quicktime";
+      }
       fileMimeCache.set(fileId, { mimeType, expires: Date.now() + 30 * 60 * 1000 });
     }
 
-    res.setHeader("Content-Type", mimeType);
+    const userAgent = (req.headers["user-agent"] || "").toLowerCase();
+    const isAppleDevice = /iphone|ipad|ipod|macintosh|mac os/i.test(userAgent);
+
+    // Apple devices (iPhone/Safari) require video/quicktime for .mov files
+    // Non-Apple browsers require video/mp4
+    let responseMimeType = mimeType;
+    if (responseMimeType === "video/quicktime") {
+      responseMimeType = isAppleDevice ? "video/quicktime" : "video/mp4";
+    }
+
+    res.setHeader("Content-Type", responseMimeType);
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Accept-Ranges", "bytes");
     res.setHeader("Cache-Control", "public, max-age=3600");
 
     const requestHeaders: Record<string, string> = {};
@@ -727,17 +867,54 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
       { responseType: "stream", headers: requestHeaders }
     );
 
+    const contentRange = getResponseHeader(response.headers, "content-range");
+    const contentLength = getResponseHeader(response.headers, "content-length");
+
     if (response.status === 206) {
       res.status(206);
-      if (response.headers["content-range"]) res.setHeader("Content-Range", response.headers["content-range"]);
-      if (response.headers["accept-ranges"]) res.setHeader("Accept-Ranges", response.headers["accept-ranges"]);
-      if (response.headers["content-length"]) res.setHeader("Content-Length", response.headers["content-length"]);
+      if (contentRange) res.setHeader("Content-Range", contentRange);
+      if (contentLength) res.setHeader("Content-Length", contentLength);
+    } else if (req.headers.range && contentLength) {
+      // If client sent Range but Google returned 200, format 206 Partial Content header for Safari compatibility
+      const totalSize = contentLength;
+      res.status(206);
+      res.setHeader("Content-Range", `bytes 0-${parseInt(totalSize, 10) - 1}/${totalSize}`);
+      res.setHeader("Content-Length", contentLength);
+    } else if (contentLength) {
+      res.setHeader("Content-Length", contentLength);
     }
 
     response.data.pipe(res);
   } catch (err: any) {
     console.error("Image proxy fetch failed:", err);
     res.status(404).send("Image not found or loading failed.");
+  }
+});
+
+// Ensure public reader permission for a file (needed for Google Drive's embedded web preview player)
+app.post("/api/photos/ensure-permission/:fileId", async (req, res) => {
+  const { fileId } = req.params;
+  const queryFolderId = req.query.folderId as string;
+  const sessionId = (req as any).sessionId;
+
+  try {
+    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    if (!creds) creds = await getSavedCredentials(sessionId);
+    if (!creds) creds = getFileFallbackCredentials();
+    if (!creds) return res.status(404).json({ error: "Credentials not found." });
+
+    const drive = getAuthorizedDriveClient(creds);
+    await drive.permissions.create({
+      fileId,
+      requestBody: {
+        role: "reader",
+        type: "anyone",
+        allowFileDiscovery: false,
+      },
+    });
+    res.json({ success: true });
+  } catch (err: any) {
+    res.json({ success: true, note: err.message });
   }
 });
 
@@ -817,6 +994,20 @@ app.post("/api/upload", (req, res, next) => {
         media: media,
         fields: "id, name, mimeType, thumbnailLink, createdTime, size",
       });
+    }
+
+    // Grant anyone with link read permission so Google Drive's preview player works for all guests
+    try {
+      await drive.permissions.create({
+        fileId: driveResponse.data.id,
+        requestBody: {
+          role: "reader",
+          type: "anyone",
+          allowFileDiscovery: false,
+        },
+      });
+    } catch (permErr) {
+      console.warn("Could not set anyoneWithLink permission on upload:", permErr);
     }
 
     // Cache uploaded file for 5 minutes so immediate playback by guests/uploaders starts in 0.01s

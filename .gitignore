@@ -8,4 +8,5 @@ coverage/
 !.env.example
 drive-credentials.json
 firebase-service-account.json
+scratch/
 
