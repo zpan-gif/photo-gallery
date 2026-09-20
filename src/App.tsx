@@ -270,9 +270,9 @@ export default function App() {
     }
   }, [guestFolderId]);
 
-  const isCoHost = Boolean(status?.isCoHost);
-  const canModerate = Boolean(
-    (!guestFolderId && status?.connected) ||
+  const isCoHost = !guestFolderId && Boolean(status?.isCoHost);
+  const canModerate = !guestFolderId && Boolean(
+    status?.connected ||
     status?.isHost ||
     status?.isCoHost ||
     status?.canEdit
@@ -450,10 +450,7 @@ export default function App() {
               userEmail: photoData.userEmail ?? prev.userEmail,
             } : null);
 
-            // If user logged into Google but lacks Editor permission on this Drive folder
-            if (guestFolderId && photoData.userEmail && !photoData.canEdit && !photoData.isHost) {
-              setErrorMsg(`Signed in as ${photoData.userEmail}, but this Google account is not an Editor on this Drive folder. Share the folder with this email in Google Drive to activate Co-Host mode.`);
-            }
+
           }
         }
       } else {
@@ -2439,7 +2436,7 @@ export default function App() {
               {guestFolderId ? "PhotoDrop Shared" : "PhotoDock"}
             </h1>
             <p className="text-[9px] sm:text-[10px] text-slate-400 dark:text-slate-500 font-bold font-sans mt-0.5 truncate" id="header_sync_text">
-              {guestFolderId ? (isCoHost ? "Co-Host View (Editor)" : "Guest View") : "Owner View"}
+              {guestFolderId ? "Guest View" : "Owner View"}
             </p>
           </div>
         </div>
@@ -2449,28 +2446,10 @@ export default function App() {
 
           {guestFolderId ? (
             <div className="flex items-center gap-1.5 shadow-3xs shrink-0">
-              {isCoHost ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-[10.5px] sm:text-[11px] font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-800 px-3 py-1 rounded-full flex items-center gap-1.5 shadow-3xs">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                    <span>Co-Host Mode</span>
-                  </span>
-                  <button
-                    onClick={handleDisconnect}
-                    className="text-[10.5px] sm:text-[11px] font-bold text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/50 border border-red-900 px-2.5 sm:px-3 py-1 rounded-full flex items-center gap-1 transition-all cursor-pointer shadow-3xs"
-                    title="Sign out of Co-Host mode"
-                    id="header_cohost_signout_button"
-                  >
-                    <LogOut className="h-3 w-3" />
-                    <span className="hidden sm:inline">Sign Out</span>
-                  </button>
-                </div>
-              ) : (
-                <span className="hidden xs:flex text-[11px] font-semibold text-slate-850 dark:text-slate-250 bg-slate-105 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-805 px-3 py-1 rounded-full flex items-center gap-1.5">
-                  <span className="h-1.5 w-1.5 rounded-full bg-slate-550"></span>
-                  Shared Gallery
-                </span>
-              )}
+              <span className="hidden xs:flex text-[11px] font-semibold text-slate-850 dark:text-slate-250 bg-slate-105 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-805 px-3 py-1 rounded-full flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-slate-550"></span>
+                Shared Gallery
+              </span>
             </div>
           ) : (
             <>
@@ -4303,23 +4282,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3 text-xs text-slate-400 dark:text-slate-550 font-bold font-sans">
-            {guestFolderId && !canModerate && (
-              <button
-                onClick={handleAdminAuthRedirect}
-                className="text-[11px] text-slate-500 hover:text-slate-300 transition-colors flex items-center gap-1 cursor-pointer"
-                title="Sign in with Google to activate Co-Host moderation if this folder is shared with you as an Editor"
-                id="footer_cohost_login_btn"
-              >
-                <Lock className="h-3 w-3 text-slate-500" />
-                <span>Host / Co-Host Access</span>
-              </button>
-            )}
-            {guestFolderId && isCoHost && (
-              <span className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
-                <CheckCircle className="h-3 w-3 text-emerald-400" />
-                <span>Co-Host Mode Active</span>
-              </span>
-            )}
             <span>Powered by PhotoDock</span>
           </div>
         </div>

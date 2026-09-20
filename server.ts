@@ -370,12 +370,14 @@ app.get("/api/status", async (req, res) => {
   }
 
   const queryFolderId = req.query.folderId as string;
+  const isGuestLink = !!queryFolderId;
   const targetFolderId = queryFolderId || creds?.folderId;
   let canEdit = false;
   let userRole = "guest";
   let isCoHost = false;
 
-  if (targetFolderId && creds && creds.refreshToken) {
+  // Guest links strictly never have editor access; host view can have editor access
+  if (!isGuestLink && targetFolderId && creds && creds.refreshToken) {
     try {
       const drive = getAuthorizedDriveClient(creds);
       const folderCheck = await drive.files.get({
@@ -688,13 +690,16 @@ app.get("/api/photos", async (req, res) => {
 
     const drive = getAuthorizedDriveClient(creds);
     
-    // Check if the current session is the owner/host of this folder, or a shared co-host (canEdit)
-    let isOwner = !!(ownerCreds && ownerCreds.refreshToken && ownerCreds.folderId === folderId);
+    // If queryFolderId is specified, this is a GUEST LINK:
+    // The guest link should NOT have editor access.
+    // Editor access is reserved strictly for the host link.
+    const isGuestLink = !!queryFolderId;
+    let isOwner = !isGuestLink && !!(ownerCreds && ownerCreds.refreshToken && ownerCreds.folderId === folderId);
     let canEdit = isOwner;
     let userRole = isOwner ? "owner" : "guest";
     let isCoHost = false;
 
-    if (!isOwner && ownerCreds && ownerCreds.refreshToken) {
+    if (!isGuestLink && !isOwner && ownerCreds && ownerCreds.refreshToken) {
       try {
         const userDrive = getAuthorizedDriveClient(ownerCreds);
         const folderCheck = await userDrive.files.get({
@@ -712,7 +717,7 @@ app.get("/api/photos", async (req, res) => {
       }
     }
 
-    const isHostOrCoHost = isOwner || canEdit;
+    const isHostOrCoHost = !isGuestLink && (isOwner || canEdit);
 
     // If a custom folderId is specified, fetch its metadata to get the name
     let folderName = creds.folderName || "App Uploads Gallery";
