@@ -242,12 +242,21 @@ export default function App() {
     if (selectedPhoto) {
       setShowControls(true);
       setVideoError(false);
-      const isVid = selectedPhoto.mimeType?.startsWith("video/") || selectedPhoto.name.match(/\.(mov|mp4|m4v|webm|avi|mkv)$/i);
+      const isVid = selectedPhoto.mimeType?.startsWith("video/") || Boolean(selectedPhoto.name.match(/\.(mov|mp4|m4v|webm|avi|mkv|wmv|flv)$/i));
       const isMov = selectedPhoto.name.toLowerCase().endsWith(".mov") || selectedPhoto.mimeType === "video/quicktime";
-      const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+      const userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "";
+      const isApple = /iPhone|iPad|iPod|Macintosh|Mac OS/i.test(userAgent);
 
-      // On Android devices, .mov files cannot decode in native HTML5 video tags, so auto-switch to Drive preview stream
-      if (isVid && isAndroid && isMov) {
+      // Automatic best player selection based on device and video format:
+      // - Apple devices (iPhone/iPad/Mac Safari) natively decode .mov and .mp4 with full hardware acceleration in HTML5 <video>
+      // - Android and non-Apple browsers cannot natively decode Apple QuickTime .mov files or legacy formats (.avi, .mkv, .wmv)
+      // For those devices/formats, automatically stream using Google Drive's web preview player
+      const prefersDrivePlayer = isVid && (
+        (isMov && !isApple) ||
+        Boolean(selectedPhoto.name.match(/\.(avi|mkv|wmv|flv)$/i))
+      );
+
+      if (prefersDrivePlayer) {
         setUseDrivePlayer(true);
         fetch(`/api/photos/ensure-permission/${selectedPhoto.id}`, { method: "POST" }).catch(() => {});
       } else {
@@ -3673,7 +3682,7 @@ export default function App() {
                 transition={{ duration: 0.18, ease: "easeOut" }}
                 className="w-full h-full flex items-center justify-center"
               >
-                {selectedPhoto.mimeType?.startsWith("video/") || selectedPhoto.name.match(/\.(mov|mp4|m4v|webm|avi|mkv)$/i) ? (
+                {selectedPhoto.mimeType?.startsWith("video/") || selectedPhoto.name.match(/\.(mov|mp4|m4v|webm|avi|mkv|wmv|flv)$/i) ? (
                   <div className="relative max-w-full max-h-full flex items-center justify-center">
                     {useDrivePlayer ? (
                       <div
@@ -3687,14 +3696,6 @@ export default function App() {
                           allowFullScreen
                           title={selectedPhoto.name}
                         />
-                        <div className="absolute top-3 right-3 flex items-center gap-2 z-10">
-                          <button
-                            onClick={() => setUseDrivePlayer(false)}
-                            className="px-3 py-1.5 bg-black/80 hover:bg-black text-white/90 hover:text-white text-[11px] font-semibold rounded-full border border-white/25 transition-all flex items-center gap-1.5 shadow-lg active:scale-95 cursor-pointer backdrop-blur-md"
-                          >
-                            <span>Switch to Native Player</span>
-                          </button>
-                        </div>
                       </div>
                     ) : !videoError ? (
                       <div className="relative flex items-center justify-center">
@@ -3708,26 +3709,13 @@ export default function App() {
                           id="lightbox_active_video"
                           onClick={(e) => e.stopPropagation()}
                           onError={() => {
-                            setVideoError(true);
+                            // If native playback fails on this device, seamlessly switch to Drive player
                             fetch(`/api/photos/ensure-permission/${selectedPhoto.id}`, { method: "POST" }).catch(() => {});
+                            setUseDrivePlayer(true);
                           }}
                         >
                           Your browser does not support playing this video directly.
                         </video>
-                        {/* Option to switch to Drive Player */}
-                        <div className="absolute top-2 right-2 flex items-center gap-2 z-10 pointer-events-auto">
-                          <button
-                            onClick={() => {
-                              fetch(`/api/photos/ensure-permission/${selectedPhoto.id}`, { method: "POST" }).catch(() => {});
-                              setUseDrivePlayer(true);
-                            }}
-                            className="px-3 py-1.5 bg-black/60 hover:bg-black/80 backdrop-blur-md text-white/80 hover:text-white text-[11px] font-medium rounded-full border border-white/20 transition-all flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
-                            title="Play using Google Drive web player"
-                          >
-                            <Play className="h-3 w-3 text-emerald-400 fill-emerald-400" />
-                            <span>Drive Player</span>
-                          </button>
-                        </div>
                       </div>
                     ) : (
                       <div
@@ -3739,24 +3727,13 @@ export default function App() {
                         </div>
                         <div>
                           <h3 className="text-white font-bold text-base mb-1">
-                            Play in Google Drive Player
+                            Video Unavailable
                           </h3>
                           <p className="text-white/70 text-xs leading-relaxed">
-                            This video format is optimized for Google Drive web streaming. Click below to stream smoothly.
+                            This video could not be played directly on this device. You can save it to your photo library or download it.
                           </p>
                         </div>
-                        <div className="flex flex-col sm:flex-row gap-2.5 w-full pt-1">
-                          <button
-                            onClick={() => {
-                              fetch(`/api/photos/ensure-permission/${selectedPhoto.id}`, { method: "POST" }).catch(() => {});
-                              setUseDrivePlayer(true);
-                              setVideoError(false);
-                            }}
-                            className="flex-1 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-full transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95 cursor-pointer"
-                          >
-                            <Play className="h-4 w-4 fill-white" />
-                            <span>Play in Drive Player</span>
-                          </button>
+                        <div className="flex gap-2.5 w-full pt-1">
                           <button
                             onClick={() => shareSelectedPhotosToPhone([selectedPhoto])}
                             className="flex-1 px-4 py-2.5 bg-white text-black font-bold text-xs rounded-full hover:bg-white/90 transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95 cursor-pointer"
