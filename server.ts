@@ -734,14 +734,23 @@ app.get("/api/photos", async (req, res) => {
       }
     }
 
-    const driveRes = await drive.files.list({
-      q: `'${folderId}' in parents and trashed = false`,
-      fields: "files(id, name, mimeType, createdTime, size, thumbnailLink)",
-      orderBy: "createdTime desc",
-      pageSize: 100,
-    });
+    let allFiles: any[] = [];
+    let pageToken: string | undefined = undefined;
 
-    let allFiles = driveRes.data.files || [];
+    do {
+      const driveRes: any = await drive.files.list({
+        q: `'${folderId}' in parents and trashed = false`,
+        fields: "nextPageToken, files(id, name, mimeType, createdTime, size, thumbnailLink)",
+        orderBy: "createdTime desc",
+        pageSize: 1000,
+        pageToken: pageToken,
+      });
+
+      if (driveRes.data.files && driveRes.data.files.length > 0) {
+        allFiles.push(...driveRes.data.files);
+      }
+      pageToken = driveRes.data.nextPageToken || undefined;
+    } while (pageToken);
     const hideGuestGallery = !!creds.hideGuestGallery;
 
     // If Private Guest Mode is active AND caller is a guest (not owner or co-host)
@@ -1087,13 +1096,24 @@ app.get("/api/folders", async (req, res) => {
       return res.json({ folders: [] });
     }
     const drive = getAuthorizedDriveClient(creds);
-    const driveRes = await drive.files.list({
-      q: "mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-      fields: "files(id, name)",
-      orderBy: "name",
-      pageSize: 100,
-    });
-    res.json({ folders: driveRes.data.files || [] });
+    let allFolders: any[] = [];
+    let folderPageToken: string | undefined = undefined;
+
+    do {
+      const driveRes: any = await drive.files.list({
+        q: "mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+        fields: "nextPageToken, files(id, name)",
+        orderBy: "name",
+        pageSize: 1000,
+        pageToken: folderPageToken,
+      });
+      if (driveRes.data.files && driveRes.data.files.length > 0) {
+        allFolders.push(...driveRes.data.files);
+      }
+      folderPageToken = driveRes.data.nextPageToken || undefined;
+    } while (folderPageToken);
+
+    res.json({ folders: allFolders });
   } catch (err: any) {
     console.error("Error listing folders:", err);
     // If we're on limited drive.file scope, full folder scan is restricted. Return an empty list gracefully
