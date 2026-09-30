@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
@@ -17,15 +18,91 @@ const PORT = 3000;
 
 app.use(express.json());
 
+// Security Headers Middleware
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "SAMEORIGIN");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("X-XSS-Protection", "1; mode=block");
+  if (process.env.NODE_ENV === "production" || req.secure || req.headers["x-forwarded-proto"] === "https") {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+  next();
+});
+
+// Lightweight In-Memory Rate Limiter Middleware
+interface RateLimitBucket {
+  count: number;
+  resetTime: number;
+}
+const rateLimitStore = new Map<string, RateLimitBucket>();
+
+// Cleanup stale rate limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateLimitStore.entries()) {
+    if (bucket.resetTime < now) {
+      rateLimitStore.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
+
+function createRateLimiter(windowMs: number, maxRequests: number, prefix: string) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip = req.ip || req.socket.remoteAddress || "unknown_ip";
+    const key = `${prefix}:${ip}`;
+    const now = Date.now();
+
+    let bucket = rateLimitStore.get(key);
+    if (!bucket || bucket.resetTime < now) {
+      bucket = { count: 1, resetTime: now + windowMs };
+      rateLimitStore.set(key, bucket);
+      return next();
+    }
+
+    if (bucket.count >= maxRequests) {
+      const retryAfterSeconds = Math.ceil((bucket.resetTime - now) / 1000);
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      return res.status(429).json({
+        error: "Too many requests. Please slow down and try again later.",
+        retryAfterSeconds,
+      });
+    }
+
+    bucket.count += 1;
+    next();
+  };
+}
+
+const authRateLimiter = createRateLimiter(60 * 1000, 20, "auth");
+const uploadRateLimiter = createRateLimiter(60 * 1000, 50, "upload");
+const actionRateLimiter = createRateLimiter(60 * 1000, 30, "action");
+
+// Apply rate limiters to sensitive routes
+app.use("/api/auth", authRateLimiter);
+app.use("/api/oauth", authRateLimiter);
+app.use("/api/upload", uploadRateLimiter);
+app.use("/api/delete", actionRateLimiter);
+app.use("/api/folders", actionRateLimiter);
+app.use("/api/cohosts", actionRateLimiter);
+app.use("/api/settings", actionRateLimiter);
+
 // Session Middleware to parse/assign session cookie
 app.use((req, res, next) => {
   const cookieHeader = req.headers.cookie || "";
-  const match = cookieHeader.match(/session_id=([^;]+)/);
+  const match = cookieHeader.match(/session_id=([a-f0-9]{64})/i);
   let sessionId = match ? match[1] : null;
 
   if (!sessionId) {
-    sessionId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-    res.cookie("session_id", sessionId, { httpOnly: true, path: "/", maxAge: 365 * 24 * 60 * 60 * 1000, sameSite: "lax" });
+    sessionId = crypto.randomBytes(32).toString("hex");
+    const isSecure = process.env.NODE_ENV === "production" || req.secure || req.headers["x-forwarded-proto"] === "https";
+    res.cookie("session_id", sessionId, {
+      httpOnly: true,
+      path: "/",
+      maxAge: 365 * 24 * 60 * 60 * 1000,
+      sameSite: "lax",
+      secure: isSecure
+    });
   }
   (req as any).sessionId = sessionId;
   next();
@@ -72,6 +149,12 @@ interface SavedCredentials {
   coHosts?: CoHostInfo[];
 }
 
+// Helper to validate Google Drive / file IDs (alphanumeric, hyphens, underscores)
+function isValidDriveId(id: string | null | undefined): boolean {
+  if (!id || typeof id !== "string") return false;
+  return /^[a-zA-Z0-9_-]{5,128}$/.test(id);
+}
+
 // Helper to read header values whether headers is a standard Headers object or plain object
 function getResponseHeader(headers: any, name: string): string | null {
   if (!headers) return null;
@@ -84,7 +167,18 @@ function getResponseHeader(headers: any, name: string): string | null {
 // Fast In-Memory Credentials Cache to eliminate Firestore roundtrip latency during batch uploads
 const sessionCredentialsCache = new Map<string, { data: SavedCredentials; expires: number }>();
 const folderCredentialsCache = new Map<string, { data: SavedCredentials; expires: number }>();
+const oauthStatesCache = new Map<string, { csrfToken: string; expires: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Periodic cleanup of stale OAuth state tokens
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, item] of oauthStatesCache.entries()) {
+    if (item.expires < now) {
+      oauthStatesCache.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
 
 // Read saved credentials containing OAuth refresh token and created folder ID from Firestore
 async function getSavedCredentials(sessionId: string): Promise<SavedCredentials | null> {
@@ -286,8 +380,9 @@ const upload = multer({
 // Cache recent uploads on disk for 5 minutes so immediate playback by guests/uploaders starts in 0.01s
 const recentUploadsCache = new Map<string, { path: string; mimeType: string; expires: number }>();
 const fileMimeCache = new Map<string, { mimeType: string; expires: number }>();
+const uploaderSessionMap = new Map<string, { sessionId: string; expires: number }>();
 
-// Periodic cleanup of cached temp files
+// Periodic cleanup of cached temp files and uploader session mappings
 setInterval(() => {
   const now = Date.now();
   for (const [id, item] of recentUploadsCache.entries()) {
@@ -303,7 +398,55 @@ setInterval(() => {
       fileMimeCache.delete(id);
     }
   }
+  for (const [id, item] of uploaderSessionMap.entries()) {
+    if (item.expires < now) {
+      uploaderSessionMap.delete(id);
+    }
+  }
 }, 60 * 1000);
+
+// Helper function to resolve host / co-host capabilities for a given session
+async function getSessionHostStatus(sessionId: string, targetFolderId?: string): Promise<{ isOwner: boolean; isCoHost: boolean; canEdit: boolean; creds: SavedCredentials | null }> {
+  let ownerCreds: SavedCredentials | null = null;
+  const sessionCached = sessionCredentialsCache.get(sessionId);
+  if (sessionCached && sessionCached.expires > Date.now()) {
+    ownerCreds = sessionCached.data;
+  } else if (db) {
+    try {
+      const doc = await db.collection("sessions").doc(sessionId).get();
+      if (doc.exists) {
+        ownerCreds = doc.data() as SavedCredentials;
+        sessionCredentialsCache.set(sessionId, { data: ownerCreds, expires: Date.now() + CACHE_TTL_MS });
+      }
+    } catch (e) {}
+  }
+
+  const folderId = targetFolderId || ownerCreds?.folderId;
+  let folderCreds = folderId ? await getSavedCredentialsForFolder(folderId) : ownerCreds;
+  if (!folderCreds && ownerCreds) {
+    folderCreds = ownerCreds;
+  }
+
+  let isOwner = false;
+  let isCoHost = false;
+
+  if (ownerCreds && ownerCreds.refreshToken) {
+    if (folderCreds?.ownerEmail && ownerCreds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === ownerCreds.ownerEmail.toLowerCase()) {
+      isOwner = true;
+    } else if (ownerCreds.folderId && folderId && ownerCreds.folderId === folderId) {
+      isOwner = true;
+    } else if (!targetFolderId && ownerCreds.refreshToken) {
+      isOwner = true;
+    }
+
+    if (!isOwner && ownerCreds.ownerEmail && folderCreds?.coHosts) {
+      isCoHost = folderCreds.coHosts.some(c => c.email.toLowerCase() === ownerCreds.ownerEmail!.toLowerCase());
+    }
+  }
+
+  const canEdit = isOwner || isCoHost;
+  return { isOwner, isCoHost, canEdit, creds: folderCreds };
+}
 
 // Lightweight health check endpoint for keep-alive monitoring
 app.get("/ping", (req, res) => {
@@ -407,6 +550,9 @@ app.get("/api/status", async (req, res) => {
   }
 
   const queryFolderId = req.query.folderId as string;
+  if (queryFolderId && !isValidDriveId(queryFolderId)) {
+    return res.status(400).json({ error: "Invalid folderId format." });
+  }
   const targetFolderId = queryFolderId || creds?.folderId;
   let canEdit = false;
   let userRole = "guest";
@@ -493,6 +639,7 @@ app.get("/api/status", async (req, res) => {
 // 2. Generate Auth Url redirect
 app.get("/api/auth/url", (req, res) => {
   try {
+    const sessionId = (req as any).sessionId;
     const useFullScope = req.query.full === "true";
     const originParam = req.query.origin ? String(req.query.origin) : "";
     
@@ -519,10 +666,15 @@ app.get("/api/auth/url", (req, res) => {
           "https://www.googleapis.com/auth/userinfo.email"
         ];
 
-    let finalState = originParam;
-    if (finalState.includes("ais-dev-")) {
-      finalState = finalState.replace("ais-dev-", "ais-pre-");
+    let cleanOrigin = originParam;
+    if (cleanOrigin.includes("ais-dev-")) {
+      cleanOrigin = cleanOrigin.replace("ais-dev-", "ais-pre-");
     }
+
+    const csrfToken = crypto.randomBytes(16).toString("hex");
+    oauthStatesCache.set(sessionId, { csrfToken, expires: Date.now() + 10 * 60 * 1000 });
+
+    const finalState = `${csrfToken}|${cleanOrigin}`;
 
     const url = oauth2Client.generateAuthUrl({
       access_type: "offline",
@@ -536,24 +688,80 @@ app.get("/api/auth/url", (req, res) => {
   }
 });
 
+// Helper to sanitize postMessage target origin
+function getPostMessageTargetOrigin(redirectOrigin: string): string {
+  if (redirectOrigin && (redirectOrigin.startsWith("http://localhost") || redirectOrigin.startsWith("http://127.0.0.1") || /^https:\/\/[a-z0-9-]+\.(onrender\.com|run\.app)/i.test(redirectOrigin) || /https:\/\/ais-(dev|pre)-[a-z0-9-]+\.[a-z0-9-.]+/i.test(redirectOrigin))) {
+    return redirectOrigin;
+  }
+  if (process.env.APP_URL) {
+    try {
+      return new URL(process.env.APP_URL).origin;
+    } catch (e) {}
+  }
+  return "window.location.origin";
+}
+
 // 3. OAuth Callback redirect handler
 app.get("/api/oauth/callback", async (req, res) => {
   const { code, error, state } = req.query;
   const sessionId = (req as any).sessionId;
 
-  let redirectOrigin = "";
+  let stateCsrf = "";
+  let stateOrigin = "";
   if (state && typeof state === "string") {
-    let stateStr = state.trim();
+    const parts = state.split("|");
+    if (parts.length >= 2) {
+      stateCsrf = parts[0];
+      stateOrigin = parts.slice(1).join("|");
+    } else {
+      stateOrigin = state;
+    }
+  }
+
+  let redirectOrigin = "";
+  if (stateOrigin) {
+    let stateStr = stateOrigin.trim();
     if (stateStr.includes("ais-dev-")) {
       stateStr = stateStr.replace("ais-dev-", "ais-pre-");
     }
-    if (stateStr.startsWith("http://localhost") || /https:\/\/ais-(dev|pre)-[a-z0-9-]+\.[a-z0-9-.]+/i.test(stateStr)) {
+    if (stateStr.startsWith("http://localhost") || stateStr.startsWith("http://127.0.0.1") || /^https:\/\/[a-z0-9-]+\.(onrender\.com|run\.app)/i.test(stateStr) || /https:\/\/ais-(dev|pre)-[a-z0-9-]+\.[a-z0-9-.]+/i.test(stateStr)) {
       redirectOrigin = stateStr;
     }
   }
 
   if (redirectOrigin.includes("ais-dev-")) {
     redirectOrigin = redirectOrigin.replace("ais-dev-", "ais-pre-");
+  }
+
+  const rawPostOrigin = getPostMessageTargetOrigin(redirectOrigin);
+  const postMessageOriginExpr = rawPostOrigin === "window.location.origin" ? "window.location.origin" : JSON.stringify(rawPostOrigin);
+
+  // Validate CSRF state token
+  const storedState = oauthStatesCache.get(sessionId);
+  oauthStatesCache.delete(sessionId); // Single-use state token
+
+  if (!storedState || storedState.expires < Date.now() || !stateCsrf || storedState.csrfToken !== stateCsrf) {
+    const errorStr = "invalid_csrf_state";
+    const msgStr = "Authentication failed: CSRF state token mismatch or expired. Please try connecting again.";
+    const destination = redirectOrigin
+      ? `${redirectOrigin}/?error=${encodeURIComponent(errorStr)}&msg=${encodeURIComponent(msgStr)}`
+      : `/?error=${encodeURIComponent(errorStr)}&msg=${encodeURIComponent(msgStr)}`;
+
+    return res.status(400).send(`
+      <html>
+        <body>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: ${JSON.stringify(errorStr)}, msg: ${JSON.stringify(msgStr)} }, ${postMessageOriginExpr});
+              window.close();
+            } else {
+              window.location.href = ${JSON.stringify(destination)};
+            }
+          </script>
+          <p>${msgStr} You may close this window.</p>
+        </body>
+      </html>
+    `);
   }
 
   if (error) {
@@ -568,7 +776,7 @@ app.get("/api/oauth/callback", async (req, res) => {
         <body>
           <script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: ${JSON.stringify(errorStr)}, msg: ${JSON.stringify(msgStr)} }, '*');
+              window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: ${JSON.stringify(errorStr)}, msg: ${JSON.stringify(msgStr)} }, ${postMessageOriginExpr});
               window.close();
             } else {
               window.location.href = ${JSON.stringify(destination)};
@@ -589,7 +797,7 @@ app.get("/api/oauth/callback", async (req, res) => {
         <body>
           <script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'missing_code', msg: 'Could not retrieve verification code from Google.' }, '*');
+              window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'missing_code', msg: 'Could not retrieve verification code from Google.' }, ${postMessageOriginExpr});
               window.close();
             } else {
               window.location.href = ${JSON.stringify(destination)};
@@ -632,7 +840,7 @@ app.get("/api/oauth/callback", async (req, res) => {
             <body>
               <script>
                 if (window.opener) {
-                  window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'no_refresh_token', msg: ${JSON.stringify(msg)} }, '*');
+                  window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'no_refresh_token', msg: ${JSON.stringify(msg)} }, ${postMessageOriginExpr});
                   window.close();
                 } else {
                   window.location.href = ${JSON.stringify(destination)};
@@ -680,7 +888,7 @@ app.get("/api/oauth/callback", async (req, res) => {
         <body>
           <script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
+              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, ${postMessageOriginExpr});
               window.close();
             } else {
               window.location.href = ${JSON.stringify(destination)};
@@ -702,7 +910,7 @@ app.get("/api/oauth/callback", async (req, res) => {
         <body>
           <script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'oauth_error', msg: ${JSON.stringify(msg)} }, '*');
+              window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'oauth_error', msg: ${JSON.stringify(msg)} }, ${postMessageOriginExpr});
               window.close();
             } else {
               window.location.href = ${JSON.stringify(destination)};
@@ -726,6 +934,9 @@ app.post("/api/disconnect", async (req, res) => {
 // 5. Gallery Photo Listing
 app.get("/api/photos", async (req, res) => {
   const queryFolderId = req.query.folderId as string;
+  if (queryFolderId && !isValidDriveId(queryFolderId)) {
+    return res.status(400).json({ error: "Invalid folderId parameter." });
+  }
   const sessionId = (req as any).sessionId;
   const myUploadsRaw = req.query.myUploads as string;
   let myUploadIds: string[] = [];
@@ -851,7 +1062,13 @@ app.get("/api/photos", async (req, res) => {
 // 6. Direct secure image streaming proxy (bypasses permissions roadblock)
 app.get("/api/photos/view/:fileId", async (req, res) => {
   const { fileId } = req.params;
+  if (!isValidDriveId(fileId)) {
+    return res.status(400).send("Invalid file ID.");
+  }
   const queryFolderId = req.query.folderId as string;
+  if (queryFolderId && !isValidDriveId(queryFolderId)) {
+    return res.status(400).send("Invalid folder ID.");
+  }
   const sessionId = (req as any).sessionId;
 
   // 1. Instant local playback if recently uploaded (bypasses Google Drive 10s processing delay)
@@ -979,7 +1196,13 @@ app.get("/api/photos/view/:fileId", async (req, res) => {
 // Ensure public reader permission for a file (needed for Google Drive's embedded web preview player)
 app.post("/api/photos/ensure-permission/:fileId", async (req, res) => {
   const { fileId } = req.params;
+  if (!isValidDriveId(fileId)) {
+    return res.status(400).json({ error: "Invalid file ID." });
+  }
   const queryFolderId = req.query.folderId as string;
+  if (queryFolderId && !isValidDriveId(queryFolderId)) {
+    return res.status(400).json({ error: "Invalid folder ID." });
+  }
   const sessionId = (req as any).sessionId;
 
   try {
@@ -1029,6 +1252,10 @@ app.post("/api/upload", (req, res, next) => {
 
   try {
     const queryFolderId = (req.body.folderId || req.query.folderId) as string;
+    if (queryFolderId && !isValidDriveId(queryFolderId)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+      return res.status(400).json({ error: "Invalid destination folder ID." });
+    }
     const sessionId = (req as any).sessionId;
     
     let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
@@ -1105,6 +1332,11 @@ app.post("/api/upload", (req, res, next) => {
       mimeType: driveResponse.data.mimeType || req.file.mimetype,
       expires: Date.now() + 30 * 60 * 1000,
     });
+    // Track uploader sessionId for delete authorization (7 days)
+    uploaderSessionMap.set(driveResponse.data.id, {
+      sessionId,
+      expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
+    });
 
     res.json({
       success: true,
@@ -1129,19 +1361,38 @@ app.post("/api/upload", (req, res, next) => {
   }
 });
 
-// 8. Delete / Trash accidental guest uploads
+// 8. Delete / Trash accidental guest uploads (Gated: Owner, Co-host, or Uploader)
 app.post("/api/delete/:fileId", async (req, res) => {
   const { fileId } = req.params;
+  if (!isValidDriveId(fileId)) {
+    return res.status(400).json({ error: "Invalid file ID." });
+  }
   const queryFolderId = req.query.folderId as string;
+  if (queryFolderId && !isValidDriveId(queryFolderId)) {
+    return res.status(400).json({ error: "Invalid folder ID." });
+  }
   const sessionId = (req as any).sessionId;
+
   try {
-    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    const hostStatus = await getSessionHostStatus(sessionId, queryFolderId);
+    const uploaderInfo = uploaderSessionMap.get(fileId);
+    const isUploader = uploaderInfo && uploaderInfo.sessionId === sessionId && uploaderInfo.expires > Date.now();
+
+    if (!hostStatus.canEdit && !isUploader) {
+      return res.status(403).json({ error: "Unauthorized: You do not have permission to delete this photo." });
+    }
+
+    let creds = hostStatus.creds;
+    if (!creds && queryFolderId) {
+      creds = await getSavedCredentialsForFolder(queryFolderId);
+    }
     if (!creds) {
       creds = await getSavedCredentials(sessionId);
     }
-    if (!creds) {
+    if (!creds || !creds.refreshToken) {
       return res.status(400).json({ error: "Google Drive is not connected." });
     }
+
     const drive = getAuthorizedDriveClient(creds);
     
     await drive.files.update({
@@ -1151,6 +1402,9 @@ app.post("/api/delete/:fileId", async (req, res) => {
       },
     });
 
+    // Remove from local uploader tracking if deleted
+    uploaderSessionMap.delete(fileId);
+
     res.json({ success: true, message: "Photo successfully sent to owner's drive trash bin." });
   } catch (err: any) {
     console.error("Photo trashing failed:", err);
@@ -1158,12 +1412,12 @@ app.post("/api/delete/:fileId", async (req, res) => {
   }
 });
 
-// 9. List Google Drive Folders
+// 9. List Google Drive Folders (Host only)
 app.get("/api/folders", async (req, res) => {
   const sessionId = (req as any).sessionId;
   try {
     const creds = await getSavedCredentials(sessionId);
-    if (!creds) {
+    if (!creds || !creds.refreshToken) {
       return res.json({ folders: [] });
     }
     const drive = getAuthorizedDriveClient(creds);
@@ -1192,17 +1446,17 @@ app.get("/api/folders", async (req, res) => {
   }
 });
 
-// 10. Select Active Folder
+// 10. Select Active Folder (Host only)
 app.post("/api/folders/select", async (req, res) => {
   const { folderId, folderName } = req.body;
   const sessionId = (req as any).sessionId;
-  if (!folderId || !folderName) {
-    return res.status(400).json({ error: "Missing folderId or folderName" });
+  if (!folderId || !folderName || !isValidDriveId(folderId)) {
+    return res.status(400).json({ error: "Missing or invalid folderId or folderName" });
   }
   try {
     const creds = await getSavedCredentials(sessionId);
-    if (!creds) {
-      return res.status(400).json({ error: "Google Drive is not connected." });
+    if (!creds || !creds.refreshToken) {
+      return res.status(401).json({ error: "Unauthorized. Google Drive is not connected." });
     }
     creds.folderId = folderId;
     creds.folderName = folderName;
@@ -1214,7 +1468,7 @@ app.post("/api/folders/select", async (req, res) => {
   }
 });
 
-// 11. Create and Select New Folder
+// 11. Create and Select New Folder (Host only)
 app.post("/api/folders/create", async (req, res) => {
   const { name } = req.body;
   const sessionId = (req as any).sessionId;
@@ -1223,8 +1477,8 @@ app.post("/api/folders/create", async (req, res) => {
   }
   try {
     const creds = await getSavedCredentials(sessionId);
-    if (!creds) {
-      return res.status(400).json({ error: "Google Drive is not connected." });
+    if (!creds || !creds.refreshToken) {
+      return res.status(401).json({ error: "Unauthorized. Google Drive is not connected." });
     }
     const drive = getAuthorizedDriveClient(creds);
     const fileMetadata = {
@@ -1275,11 +1529,16 @@ app.get("/api/settings", async (req, res) => {
 // 13. Update Gallery Settings (owner-only — session gated)
 app.post("/api/settings", async (req, res) => {
   const sessionId = (req as any).sessionId;
-  const { allowGuestNames, hideGuestGallery } = req.body;
+  const { allowGuestNames, hideGuestGallery, folderId: reqFolderId } = req.body;
   try {
+    const hostStatus = await getSessionHostStatus(sessionId, reqFolderId);
+    if (!hostStatus.canEdit && !hostStatus.isOwner) {
+      return res.status(403).json({ error: "Unauthorized: You must be the gallery host to modify settings." });
+    }
+
     const creds = await getSavedCredentials(sessionId);
-    if (!creds) {
-      return res.status(400).json({ error: "Not authenticated. You must be the gallery owner." });
+    if (!creds || !creds.refreshToken) {
+      return res.status(401).json({ error: "Not authenticated. You must be the gallery owner." });
     }
     if (allowGuestNames !== undefined) creds.allowGuestNames = !!allowGuestNames;
     if (hideGuestGallery !== undefined) creds.hideGuestGallery = !!hideGuestGallery;
