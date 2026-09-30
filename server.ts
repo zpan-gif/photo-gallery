@@ -68,6 +68,7 @@ interface SavedCredentials {
   folderId?: string;
   folderName?: string;
   ownerEmail?: string;
+  ownerSessionId?: string;
   allowGuestNames?: boolean;
   hideGuestGallery?: boolean;
   coHosts?: CoHostInfo[];
@@ -88,30 +89,40 @@ const sessionCredentialsCache = new Map<string, { data: SavedCredentials; expire
 const folderCredentialsCache = new Map<string, { data: SavedCredentials; expires: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-// Read saved credentials containing OAuth refresh token and created folder ID from Firestore
+// Read saved credentials containing OAuth refresh token and created folder ID for a specific session
 async function getSavedCredentials(sessionId: string): Promise<SavedCredentials | null> {
+  if (!sessionId) return null;
+
   const cached = sessionCredentialsCache.get(sessionId);
   if (cached && cached.expires > Date.now()) {
     return cached.data;
   }
 
-  if (!db) {
-    return getFileFallbackCredentials();
-  }
-  try {
-    const doc = await db.collection("sessions").doc(sessionId).get();
-    if (doc.exists) {
-      const data = doc.data() as SavedCredentials;
-      sessionCredentialsCache.set(sessionId, { data, expires: Date.now() + CACHE_TTL_MS });
-      if (data.folderId) {
-        folderCredentialsCache.set(data.folderId, { data, expires: Date.now() + CACHE_TTL_MS });
+  if (db) {
+    try {
+      const doc = await db.collection("sessions").doc(sessionId).get();
+      if (doc.exists) {
+        const data = doc.data() as SavedCredentials;
+        sessionCredentialsCache.set(sessionId, { data, expires: Date.now() + CACHE_TTL_MS });
+        if (data.folderId) {
+          folderCredentialsCache.set(data.folderId, { data, expires: Date.now() + CACHE_TTL_MS });
+        }
+        return data;
       }
-      return data;
+    } catch (e) {
+      console.error("Error reading saved credentials from Firestore:", e);
     }
-  } catch (e) {
-    console.error("Error reading saved credentials from Firestore:", e);
   }
-  return getFileFallbackCredentials();
+
+  // Fallback to local drive-credentials.json ONLY if this session is the one that authenticated
+  const fileCreds = getFileFallbackCredentials();
+  if (fileCreds && fileCreds.ownerSessionId && fileCreds.ownerSessionId === sessionId) {
+    sessionCredentialsCache.set(sessionId, { data: fileCreds, expires: Date.now() + CACHE_TTL_MS });
+    return fileCreds;
+  }
+
+  // Never return another user's session credentials to an unauthenticated visitor!
+  return null;
 }
 
 // Fallback to local drive-credentials.json if Firestore does not contain credentials
@@ -128,14 +139,15 @@ function getFileFallbackCredentials(): SavedCredentials | null {
 
 // Save credentials safely to Firestore and local fallback
 async function saveCredentials(sessionId: string, creds: SavedCredentials) {
-  sessionCredentialsCache.set(sessionId, { data: creds, expires: Date.now() + CACHE_TTL_MS });
+  const credsWithSession: SavedCredentials = { ...creds, ownerSessionId: sessionId };
+  sessionCredentialsCache.set(sessionId, { data: credsWithSession, expires: Date.now() + CACHE_TTL_MS });
   if (creds.folderId) {
-    folderCredentialsCache.set(creds.folderId, { data: creds, expires: Date.now() + CACHE_TTL_MS });
+    folderCredentialsCache.set(creds.folderId, { data: credsWithSession, expires: Date.now() + CACHE_TTL_MS });
   }
 
   try {
     const filePath = path.join(process.cwd(), "drive-credentials.json");
-    fs.writeFileSync(filePath, JSON.stringify(creds, null, 2));
+    fs.writeFileSync(filePath, JSON.stringify(credsWithSession, null, 2));
   } catch (e) {
     console.error("Error writing fallback credentials:", e);
   }
@@ -144,7 +156,7 @@ async function saveCredentials(sessionId: string, creds: SavedCredentials) {
     return;
   }
   try {
-    await db.collection("sessions").doc(sessionId).set(creds, { merge: true });
+    await db.collection("sessions").doc(sessionId).set(credsWithSession, { merge: true });
   } catch (e) {
     console.error("Error writing credentials to Firestore:", e);
   }
@@ -1197,20 +1209,40 @@ app.post("/api/upload", (req, res, next) => {
   }
 });
 
-// 8. Delete / Trash accidental guest uploads
+// 8. Delete / Trash accidental guest uploads (Owner or authorized co-host only)
 app.post("/api/delete/:fileId", async (req, res) => {
   const { fileId } = req.params;
   const queryFolderId = req.query.folderId as string;
   const sessionId = (req as any).sessionId;
+  const reqCoHostKey = (req.query.key || req.query.cohostKey || req.headers["x-cohost-key"]) as string | undefined;
   try {
-    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
-    if (!creds) {
-      creds = await getSavedCredentials(sessionId);
+    let folderCreds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
+    let userCreds = await getSavedCredentials(sessionId);
+    if (!folderCreds && userCreds?.folderId) {
+      folderCreds = userCreds;
     }
-    if (!creds) {
+
+    const isOwner = Boolean(
+      userCreds?.refreshToken &&
+      ((folderCreds?.ownerEmail && userCreds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === userCreds.ownerEmail.toLowerCase()) ||
+       (userCreds.folderId && userCreds.folderId === queryFolderId))
+    );
+
+    const isCoHost = Boolean(
+      folderCreds?.coHostKey &&
+      reqCoHostKey &&
+      reqCoHostKey.trim() === folderCreds.coHostKey.trim()
+    );
+
+    if (!isOwner && !isCoHost) {
+      return res.status(403).json({ error: "Only the album owner or an authorized co-host can delete photos." });
+    }
+
+    const driveCreds = folderCreds || userCreds;
+    if (!driveCreds) {
       return res.status(400).json({ error: "Google Drive is not connected." });
     }
-    const drive = getAuthorizedDriveClient(creds);
+    const drive = getAuthorizedDriveClient(driveCreds);
     
     await drive.files.update({
       fileId,
