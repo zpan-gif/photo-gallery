@@ -69,6 +69,7 @@ interface ServerStatus {
   isCoHost?: boolean;
   canEdit?: boolean;
   userRole?: string;
+  coHostKey?: string;
   coHosts?: CoHostInfo[];
   envConfigured: boolean;
   storageQuota?: {
@@ -226,10 +227,26 @@ export default function App() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Guest view and Link isolation properties
-  const [guestFolderId, setGuestFolderId] = useState<string | null>(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("folder") || params.get("g") || null;
+  const [urlParams] = useState(() => new URLSearchParams(window.location.search));
+  const urlRole = urlParams.get("role");
+  const urlFolder = urlParams.get("folder") || urlParams.get("g");
+  const urlKey = urlParams.get("key") || urlParams.get("cohostKey");
+  const isCoHostRoleUrl = urlRole === "cohost" || !!urlKey;
+
+  const [guestFolderId, setGuestFolderId] = useState<string | null>(() => urlFolder);
+  const [coHostKey, setCoHostKey] = useState<string | null>(() => {
+    if (urlKey) {
+      if (urlFolder) {
+        try { localStorage.setItem(`cohost_key_${urlFolder}`, urlKey); } catch {}
+      }
+      return urlKey;
+    }
+    if (urlFolder) {
+      try { return localStorage.getItem(`cohost_key_${urlFolder}`); } catch { return null; }
+    }
+    return null;
   });
+
   const [guestFolderName, setGuestFolderName] = useState<string | null>(null);
   const [copiedShareLink, setCopiedShareLink] = useState(false);
 
@@ -258,10 +275,6 @@ export default function App() {
       const userAgent = typeof navigator !== "undefined" ? navigator.userAgent : "";
       const isApple = /iPhone|iPad|iPod|Macintosh|Mac OS/i.test(userAgent);
 
-      // Automatic best player selection based on device and video format:
-      // - Apple devices (iPhone/iPad/Mac Safari) natively decode .mov and .mp4 with full hardware acceleration in HTML5 <video>
-      // - Android and non-Apple browsers cannot natively decode Apple QuickTime .mov files or legacy formats (.avi, .mkv, .wmv)
-      // For those devices/formats, automatically stream using Google Drive's web preview player
       const prefersDrivePlayer = isVid && (
         (isMov && !isApple) ||
         Boolean(selectedPhoto.name.match(/\.(avi|mkv|wmv|flv)$/i))
@@ -279,18 +292,7 @@ export default function App() {
   // Instant in-memory blob URLs for freshly uploaded media (0ms instant playback)
   const [localMediaBlobs, setLocalMediaBlobs] = useState<Record<string, string>>({});
 
-  // Dark/Light theme state
-  const darkMode = !!guestFolderId;
-
-  useEffect(() => {
-    if (guestFolderId) {
-      document.documentElement.classList.add("dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-    }
-  }, [guestFolderId]);
-
-  const isCoHost = Boolean(status?.isCoHost);
+  const isCoHost = Boolean(status?.isCoHost || (isCoHostRoleUrl && (status?.isHost || status?.canEdit)));
   const isOwner = Boolean((status?.connected ?? false) && (status?.userRole === "owner" || (!isCoHost && !guestFolderId)));
   const canModerate = Boolean(
     isOwner ||
@@ -298,6 +300,35 @@ export default function App() {
     status?.isHost ||
     status?.canEdit
   );
+
+  // Host View: Shown to owners and co-hosts with full album management rights
+  const isHostView = Boolean(
+    (status?.connected && (isOwner || isCoHost || status?.isHost || status?.canEdit || status?.userRole === "cohost" || status?.userRole === "editor")) ||
+    (!guestFolderId && status?.connected && status?.folderId)
+  );
+
+  // Pure Guest View: Shown exclusively to guests without owner/co-host access
+  const isPureGuestView = Boolean(guestFolderId && !isHostView);
+
+  // Dark/Light theme state: Guests default to dark mode; Host/Co-Host view matches owner dashboard
+  const darkMode = isPureGuestView;
+
+  useEffect(() => {
+    if (isPureGuestView) {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
+  }, [isPureGuestView]);
+
+  useEffect(() => {
+    if (status?.coHostKey && status.folderId) {
+      try { localStorage.setItem(`cohost_key_${status.folderId}`, status.coHostKey); } catch {}
+      if (!coHostKey) {
+        setCoHostKey(status.coHostKey);
+      }
+    }
+  }, [status?.coHostKey, status?.folderId]);
 
   // Co-Hosts Management states
   const [showCoHostsModal, setShowCoHostsModal] = useState(false);
@@ -444,11 +475,29 @@ export default function App() {
 
   const fetchStatusAndPhotos = async () => {
     try {
-      const statusUrl = guestFolderId ? `/api/status?folderId=${guestFolderId}` : "/api/status";
-      const statusRes = await fetch(statusUrl);
+      const activeFolder = guestFolderId || status?.folderId;
+      const activeKey = coHostKey || (activeFolder ? localStorage.getItem(`cohost_key_${activeFolder}`) : null);
+
+      const statusParams = new URLSearchParams();
+      if (guestFolderId) statusParams.set("folderId", guestFolderId);
+      if (activeKey) statusParams.set("key", activeKey);
+      if (urlRole) statusParams.set("role", urlRole);
+
+      const statusQuery = statusParams.toString();
+      const statusUrl = statusQuery ? `/api/status?${statusQuery}` : "/api/status";
+      const statusRes = await fetch(statusUrl, {
+        headers: { ...(activeKey ? { "x-cohost-key": activeKey } : {}) }
+      });
       if (!statusRes.ok) throw new Error("Failed to load server auth status");
       const statusData: ServerStatus = await statusRes.json();
       setStatus(statusData);
+      if (statusData.coHostKey) {
+        setCoHostKey(statusData.coHostKey);
+        const fid = guestFolderId || statusData.folderId;
+        if (fid) {
+          try { localStorage.setItem(`cohost_key_${fid}`, statusData.coHostKey); } catch {}
+        }
+      }
 
       // Dynamically fetch photos based on guest or owner view
       const targetFolderId = guestFolderId || statusData.folderId;
@@ -458,7 +507,16 @@ export default function App() {
           setGuestFolderName("Wedding Celebration Demo");
         } else {
           const myUploadsParam = encodeURIComponent(JSON.stringify(myUploads));
-          const photoRes = await fetch(`/api/photos?folderId=${targetFolderId}&myUploads=${myUploadsParam}`);
+          const effectiveKey = activeKey || statusData.coHostKey;
+          const photoParams = new URLSearchParams({
+            folderId: targetFolderId,
+            myUploads: myUploadsParam,
+          });
+          if (effectiveKey) photoParams.set("key", effectiveKey);
+
+          const photoRes = await fetch(`/api/photos?${photoParams.toString()}`, {
+            headers: { ...(effectiveKey ? { "x-cohost-key": effectiveKey } : {}) }
+          });
           if (photoRes.ok) {
             const photoData = await photoRes.json();
             setPhotos(photoData.photos || []);
@@ -476,9 +534,8 @@ export default function App() {
               canEdit: photoData.canEdit ?? prev.canEdit,
               userRole: photoData.userRole ?? prev.userRole,
               userEmail: photoData.userEmail ?? prev.userEmail,
+              coHostKey: photoData.coHostKey ?? prev.coHostKey,
             } : null);
-
-
           }
         }
       } else {
@@ -577,7 +634,10 @@ export default function App() {
     if (origin.includes("ais-dev-")) {
       origin = origin.replace("ais-dev-", "ais-pre-");
     }
-    return `${origin}/?folder=${folderId}&role=cohost`;
+    const activeKey = status?.coHostKey || coHostKey || (folderId ? localStorage.getItem(`cohost_key_${folderId}`) : null);
+    return activeKey
+      ? `${origin}/?folder=${folderId}&role=cohost&key=${encodeURIComponent(activeKey)}`
+      : `${origin}/?folder=${folderId}&role=cohost`;
   };
 
   const handleCopyCoHostLink = (folderId: string) => {
@@ -586,7 +646,7 @@ export default function App() {
       .then(() => {
         setCopiedCoHostLink(true);
         setTimeout(() => setCopiedCoHostLink(false), 2000);
-        setSuccessMsg("Co-Host invite link copied to clipboard!");
+        setSuccessMsg("Co-Host direct link copied! Send it to grant full Owner View.");
       })
       .catch(() => {
         setErrorMsg("Failed to copy link. Please copy manually.");
@@ -596,11 +656,19 @@ export default function App() {
   const fetchCoHosts = async () => {
     const activeFolder = guestFolderId || status?.folderId;
     if (!activeFolder) return;
+    const activeKey = status?.coHostKey || coHostKey || localStorage.getItem(`cohost_key_${activeFolder}`);
     try {
-      const res = await fetch(`/api/cohosts?folderId=${activeFolder}`);
+      const res = await fetch(`/api/cohosts?folderId=${activeFolder}${activeKey ? `&key=${encodeURIComponent(activeKey)}` : ""}`, {
+        headers: { ...(activeKey ? { "x-cohost-key": activeKey } : {}) }
+      });
       if (res.ok) {
         const data = await res.json();
         setCoHosts(data.coHosts || []);
+        if (data.coHostKey) {
+          setCoHostKey(data.coHostKey);
+          localStorage.setItem(`cohost_key_${activeFolder}`, data.coHostKey);
+          setStatus(prev => prev ? { ...prev, coHostKey: data.coHostKey } : null);
+        }
       }
     } catch (e) {
       console.error("Failed to fetch co-hosts:", e);
@@ -615,12 +683,16 @@ export default function App() {
       return;
     }
     const activeFolder = guestFolderId || status?.folderId;
+    const activeKey = status?.coHostKey || coHostKey || (activeFolder ? localStorage.getItem(`cohost_key_${activeFolder}`) : null);
     setInvitingCoHost(true);
     try {
       const res = await fetch("/api/cohosts", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, folderId: activeFolder }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(activeKey ? { "x-cohost-key": activeKey } : {})
+        },
+        body: JSON.stringify({ email, folderId: activeFolder, key: activeKey }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -638,12 +710,16 @@ export default function App() {
 
   const handleRemoveCoHost = async (email: string) => {
     const activeFolder = guestFolderId || status?.folderId;
+    const activeKey = status?.coHostKey || coHostKey || (activeFolder ? localStorage.getItem(`cohost_key_${activeFolder}`) : null);
     setRemovingCoHostEmail(email);
     try {
       const res = await fetch("/api/cohosts", {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, folderId: activeFolder }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(activeKey ? { "x-cohost-key": activeKey } : {})
+        },
+        body: JSON.stringify({ email, folderId: activeFolder, key: activeKey }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1406,7 +1482,15 @@ export default function App() {
       if (activeFolder) {
         const currentUploads = JSON.parse(localStorage.getItem("public_drive_gallery_uploads") || "[]");
         const myUploadsParam = encodeURIComponent(JSON.stringify(currentUploads));
-        const photoRes = await fetch(`/api/photos?folderId=${activeFolder}&myUploads=${myUploadsParam}`);
+        const activeKey = status?.coHostKey || coHostKey || (activeFolder ? localStorage.getItem(`cohost_key_${activeFolder}`) : null);
+        const photoParams = new URLSearchParams({
+          folderId: activeFolder,
+          myUploads: myUploadsParam,
+        });
+        if (activeKey) photoParams.set("key", activeKey);
+        const photoRes = await fetch(`/api/photos?${photoParams.toString()}`, {
+          headers: { ...(activeKey ? { "x-cohost-key": activeKey } : {}) }
+        });
         if (photoRes.ok) {
           const photoData = await photoRes.json();
           setPhotos(photoData.photos || []);
@@ -2086,8 +2170,9 @@ export default function App() {
   const [guestHeroVisible, setGuestHeroVisible] = useState(() => {
     const params = new URLSearchParams(window.location.search);
     const hasFolder = params.get("folder") || params.get("g");
+    const isCoHost = params.get("role") === "cohost" || !!params.get("key") || !!params.get("cohostKey");
     const alreadySeen = sessionStorage.getItem("guest_welcome_seen") === "true";
-    return !!hasFolder && !alreadySeen;
+    return !!hasFolder && !alreadySeen && !isCoHost;
   });
 
   const dismissGuestHero = () => {
@@ -2097,7 +2182,7 @@ export default function App() {
 
   const renderGuestHeroLanding = () => (
     <AnimatePresence>
-      {guestHeroVisible && guestFolderId && (
+      {guestHeroVisible && isPureGuestView && (
         <motion.div
           key="guest-hero"
           initial={{ opacity: 0 }}
@@ -2411,14 +2496,14 @@ export default function App() {
       )}
 
       {/* ── GUEST HERO LANDING (full-screen, z-40) ──────────────────── */}
-      {guestFolderId && renderGuestHeroLanding()}
+      {isPureGuestView && renderGuestHeroLanding()}
 
       {/* ── UPLOAD SUCCESS PREVIEW MODAL (z-60) ─────────────────────── */}
       {renderUploadSuccessModal()}
 
       {/* ── GUEST NAME PROMPT MODAL (z-65) ───────────────────────────── */}
       <AnimatePresence>
-        {showNamePrompt && guestFolderId && (
+        {showNamePrompt && isPureGuestView && (
           <div className="fixed inset-0 z-[65] flex items-center justify-center p-4" id="guest_name_prompt_modal">
             {/* Backdrop */}
             <motion.div
@@ -2547,10 +2632,10 @@ export default function App() {
           </div>
           <div className="min-w-0">
             <h1 className="text-sm font-bold tracking-tight text-slate-900 dark:text-slate-100 leading-none truncate">
-              {guestFolderId ? "PhotoDrop Shared" : "PhotoDock"}
+              {isPureGuestView ? "PhotoDrop Shared" : "PhotoDock"}
             </h1>
             <p className="text-[9px] sm:text-[10px] text-slate-400 dark:text-slate-500 font-bold font-sans mt-0.5 truncate" id="header_sync_text">
-              {guestFolderId ? "Guest View" : "Owner View"}
+              {isPureGuestView ? "Guest View" : (isCoHost ? "Co-Host View • Owner Access" : "Owner View")}
             </p>
           </div>
         </div>
@@ -2558,7 +2643,7 @@ export default function App() {
         {/* Action controllers */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
 
-          {guestFolderId ? (
+          {isPureGuestView ? (
             <div className="flex items-center gap-1.5 shadow-3xs shrink-0">
               <span className="hidden xs:flex text-[11px] font-semibold text-slate-850 dark:text-slate-250 bg-slate-105 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-805 px-3 py-1 rounded-full flex items-center gap-1.5">
                 <span className="h-1.5 w-1.5 rounded-full bg-slate-550"></span>
@@ -2597,10 +2682,18 @@ export default function App() {
                       <ChevronDown className={`h-3 w-3 text-slate-400 shrink-0 transition-transform ${showAdminGuide && showFolderDropdown ? "rotate-180" : ""}`} />
                     </button>
 
-                    <span className="hidden xs:flex text-[10.5px] sm:text-[11px] font-semibold text-emerald-850 dark:text-emerald-455 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100/60 dark:border-emerald-900 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                      <span>Drive Connected</span>
-                    </span>
+                    {isCoHost && !isOwner ? (
+                      <span className="hidden xs:flex text-[10.5px] sm:text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-800 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
+                        <ShieldCheck className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                        <span>Co-Host Mode</span>
+                      </span>
+                    ) : (
+                      <span className="hidden xs:flex text-[10.5px] sm:text-[11px] font-semibold text-emerald-850 dark:text-emerald-455 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100/60 dark:border-emerald-900 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                        <span>Drive Connected</span>
+                      </span>
+                    )}
+
                     <button
                       onClick={() => setShowAdminGuide(!showAdminGuide)}
                       className={`text-[10.5px] sm:text-[11px] font-bold border-2 rounded-full px-3 py-1 flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs ${showAdminGuide
@@ -2615,13 +2708,21 @@ export default function App() {
                       <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showAdminGuide ? "rotate-180" : ""}`} />
                     </button>
                     <button
-                      onClick={handleDisconnect}
+                      onClick={() => {
+                        if (isCoHost && !isOwner) {
+                          const activeFolder = guestFolderId || status?.folderId;
+                          if (activeFolder) localStorage.removeItem(`cohost_key_${activeFolder}`);
+                          window.location.href = activeFolder ? `/?folder=${activeFolder}` : window.location.origin;
+                        } else {
+                          handleDisconnect();
+                        }
+                      }}
                       className="text-[10.5px] sm:text-[11px] font-bold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 hover:bg-red-100 dark:hover:bg-red-900/40 border border-red-200 dark:border-red-900 px-2.5 sm:px-3 py-1 rounded-full flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs"
-                      title="Sign out of Google Drive"
+                      title={isCoHost && !isOwner ? "Exit Co-Host Mode" : "Sign out of Google Drive"}
                       id="header_sign_out_button"
                     >
                       <LogOut className="h-3 w-3" />
-                      <span className="hidden sm:inline">Sign Out</span>
+                      <span className="hidden sm:inline">{isCoHost && !isOwner ? "Exit Co-Host" : "Sign Out"}</span>
                     </button>
                   </div>
                 )}
@@ -2682,7 +2783,7 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-6 pb-24" id="main_gallery_wrapper">
 
         {/* ALWAYS VISIBLE ACCORDION DROPDOWN MODULE FOR STORAGE SETTINGS */}
-        {!guestFolderId && status?.connected && status?.folderId && (
+        {isHostView && status?.connected && status?.folderId && (
           <div className="pt-6 mb-4" id="storage_settings_inline_module">
             <div
               className="border-2 border-slate-950 dark:border-white bg-white dark:bg-slate-900 rounded-[28px] overflow-hidden shadow-md transition-all duration-200"
@@ -3078,7 +3179,7 @@ export default function App() {
         )}
 
         {/* Title & Core Apple Photo Navigation segment tabs */}
-        {!guestFolderId && status?.connected && status?.folderId ? (
+        {isHostView && status?.connected && status?.folderId ? (
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 py-6" id="photo_controls_dashboard">
             <div className="space-y-1.5 flex-1 min-w-0">
               <h2 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100">
@@ -3224,7 +3325,7 @@ export default function App() {
               </div>
             )}
           </div>
-        ) : !guestFolderId ? null : (
+        ) : !isPureGuestView ? null : (
           <>
             {isCoHost && (
               <div className="mb-4 p-3.5 bg-indigo-500/10 border border-indigo-500/30 rounded-2xl flex items-center justify-between gap-3 text-indigo-900 dark:text-indigo-200 text-xs font-semibold shadow-3xs" id="cohost_moderator_badge">
@@ -3396,12 +3497,12 @@ export default function App() {
             <RefreshCw className="h-6 w-6 text-slate-500 animate-spin" />
             <p className="text-xs text-slate-400 font-sans font-medium">Loading photos...</p>
           </div>
-        ) : !status?.connected && !guestFolderId ? (
+        ) : !status?.connected && !guestFolderId && !coHostKey ? (
           <div className="max-w-4xl mx-auto space-y-10" id="welcome_and_instructions_wrapper">
             {renderOnboardingStepsHeader(1)}
             {renderInstructionsPlaybook()}
           </div>
-        ) : status?.connected && (!status?.folderId || status?.folderName === "App Uploads Gallery" || forceSelectFolderState) && !guestFolderId ? (
+        ) : status?.connected && (!status?.folderId || status?.folderName === "App Uploads Gallery" || forceSelectFolderState) && !guestFolderId && isOwner ? (
           /* FORCED FOLDER CONFIGURATION CARD FOR OWNER */
           <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-[32px] p-6 sm:p-10 shadow-xs max-w-lg mx-auto space-y-6 animate-fade-in" id="forced_folder_activation">
             {renderOnboardingStepsHeader(2)}
@@ -3532,7 +3633,7 @@ export default function App() {
               />
 
               {/* CARD 1: EXTREMELY INTEGRATED APPLE PUBLIC DROP CARD */}
-              {!guestFolderId && (
+              {isHostView && (
                 <div
                   onClick={() => !uploading && fileInputRef.current?.click()}
                   className={`relative aspect-square border-2 border-dashed rounded-2xl flex flex-col items-center justify-center text-center transition-all duration-200 select-none overflow-hidden ${uploading
@@ -3685,7 +3786,7 @@ export default function App() {
 
             {/* Empty grid filter results caption */}
             {filteredPhotos.length === 0 && (
-              guestFolderId && photos.length === 0 ? (
+              isPureGuestView && photos.length === 0 ? (
                 <div className="text-center py-20 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-[32px] p-6 shadow-xs" id="empty_gallery_caption">
                   <div className="text-indigo-650 dark:text-indigo-400 p-4 bg-indigo-50 dark:bg-indigo-950/40 inline-block rounded-full mb-4 animate-bounce">
                     <ImageIcon className="h-8 w-8" />
@@ -3707,12 +3808,12 @@ export default function App() {
                     <ImageIcon className="h-6 w-6 text-slate-400" />
                   </div>
                   <p className="text-xs font-bold text-slate-900 dark:text-slate-100 uppercase tracking-widest font-mono">
-                    {guestFolderId ? "No Matches Found" : "No Photos Located"}
+                    {isPureGuestView ? "No Matches Found" : "No Photos Located"}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-2 max-w-xs mx-auto leading-relaxed">
                     {searchQuery || selectedUploader
                       ? `No photos matched ${selectedUploader ? `uploader "${selectedUploader}"` : ""} ${searchQuery ? `"${searchQuery}"` : ""}. Try clearing filters.`
-                      : guestFolderId
+                      : isPureGuestView
                         ? "No pictures matched your active search query or filter. Try switching tabs or clearing your search query."
                         : "No pictures matched your active query. Drop a photo using the card on top to populate the grid."
                     }
@@ -4625,7 +4726,7 @@ export default function App() {
       </footer>
 
       {/* FLOATING ADD PHOTOS BUTTON FOR GUESTS ONLY */}
-      {guestFolderId && (
+      {isPureGuestView && (
         <div className="fixed bottom-6 right-6 z-35 md:bottom-8 md:right-8">
           <button
             onClick={() => fileInputRef.current?.click()}

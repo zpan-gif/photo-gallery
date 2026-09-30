@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -70,6 +71,7 @@ interface SavedCredentials {
   allowGuestNames?: boolean;
   hideGuestGallery?: boolean;
   coHosts?: CoHostInfo[];
+  coHostKey?: string;
 }
 
 // Helper to read header values whether headers is a standard Headers object or plain object
@@ -408,6 +410,9 @@ app.get("/api/status", async (req, res) => {
 
   const queryFolderId = req.query.folderId as string;
   const targetFolderId = queryFolderId || creds?.folderId;
+  const reqCoHostKey = (req.query.key || req.query.cohostKey || req.headers["x-cohost-key"]) as string | undefined;
+  const roleParam = req.query.role as string | undefined;
+
   let canEdit = false;
   let userRole = "guest";
   let isCoHost = false;
@@ -417,9 +422,28 @@ app.get("/api/status", async (req, res) => {
     folderCreds = creds;
   }
 
-  // Check ownership & co-host capabilities
-  if (targetFolderId && creds && creds.refreshToken) {
-    // 1. Is caller the owner?
+  // Ensure target folder has a stable coHostKey generated and saved
+  if (folderCreds && targetFolderId && !folderCreds.coHostKey) {
+    folderCreds.coHostKey = crypto.randomBytes(16).toString("hex");
+    await updateFolderCredentials(targetFolderId, { coHostKey: folderCreds.coHostKey });
+  }
+
+  // 1. Check direct coHostKey authorization (from Co-Host Direct Link)
+  const isKeyAuthorized = Boolean(
+    folderCreds?.coHostKey &&
+    reqCoHostKey &&
+    reqCoHostKey.trim() === folderCreds.coHostKey.trim()
+  );
+
+  if (isKeyAuthorized || (roleParam === "cohost" && isKeyAuthorized)) {
+    canEdit = true;
+    isCoHost = true;
+    userRole = "cohost";
+  }
+
+  // 2. Check ownership & Google Drive session capabilities
+  if (!canEdit && targetFolderId && creds && creds.refreshToken) {
+    // Is caller the owner?
     const isOwnerAccount = Boolean(
       (folderCreds?.ownerEmail && creds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === creds.ownerEmail.toLowerCase()) ||
       (!queryFolderId && creds.folderId === targetFolderId)
@@ -430,7 +454,7 @@ app.get("/api/status", async (req, res) => {
       userRole = "owner";
       isCoHost = false;
     } else {
-      // 2. Check if caller's email is in invited coHosts list
+      // Check if caller's email is in invited coHosts list
       const inCoHostsList = Boolean(
         creds.ownerEmail &&
         folderCreds?.coHosts?.some(c => c.email.toLowerCase() === creds.ownerEmail!.toLowerCase())
@@ -441,7 +465,7 @@ app.get("/api/status", async (req, res) => {
         isCoHost = true;
         userRole = "editor";
       } else {
-        // 3. Check direct Google Drive capabilities
+        // Check direct Google Drive capabilities
         try {
           const drive = getAuthorizedDriveClient(creds);
           const folderCheck = await drive.files.get({
@@ -461,17 +485,55 @@ app.get("/api/status", async (req, res) => {
     }
   }
 
+  // If authorized as co-host or owner, determine connection state
+  const isConnected = !!(creds && creds.refreshToken) || (isCoHost && !!(folderCreds && folderCreds.refreshToken));
+
+  // If storageQuota wasn't fetched yet (e.g. caller doesn't have direct session) but folderCreds exists, fetch it
+  if (!storageQuota && isCoHost && folderCreds && folderCreds.refreshToken) {
+    try {
+      const drive = getAuthorizedDriveClient(folderCreds);
+      const aboutRes = await drive.about.get({ fields: "storageQuota" });
+      if (aboutRes.data && aboutRes.data.storageQuota) {
+        const quota = aboutRes.data.storageQuota;
+        const limitStr = quota.limit ? String(quota.limit) : "0";
+        const usageStr = quota.usage ? String(quota.usage) : "0";
+        const limitNum = parseInt(limitStr, 10);
+        const usageNum = parseInt(usageStr, 10);
+        let percentageUsed = 0;
+        let isNearingLimit = false;
+        if (limitNum > 0) {
+          percentageUsed = (usageNum / limitNum) * 100;
+          const remainingNum = limitNum - usageNum;
+          if (percentageUsed >= 85 || remainingNum < 1500000000) {
+            isNearingLimit = true;
+          }
+        }
+        storageQuota = {
+          limit: limitStr,
+          usage: usageStr,
+          percentageUsed: Math.round(percentageUsed * 10) / 10,
+          isNearingLimit,
+        };
+      }
+    } catch (e) {
+      console.error("Failed to fetch Google Drive storage quota for co-host:", e);
+    }
+  }
+
   res.json({
-    connected: !!(creds && creds.refreshToken),
+    connected: isConnected,
     folderId: targetFolderId || (creds ? creds.folderId : null),
     folderName: folderCreds ? (folderCreds.folderName || "App Uploads Gallery") : null,
     ownerEmail: folderCreds?.ownerEmail || ownerEmail || null,
-    userEmail: ownerEmail || null,
+    userEmail: creds?.ownerEmail || (isCoHost ? "Co-Host Moderator" : (ownerEmail || null)),
     canEdit,
-    isHost: canEdit || userRole === "owner",
+    isHost: canEdit || userRole === "owner" || isCoHost,
     isCoHost,
     userRole,
+    coHostKey: (canEdit || isCoHost || userRole === "owner") ? folderCreds?.coHostKey : undefined,
     coHosts: folderCreds?.coHosts || [],
+    allowGuestNames: !!folderCreds?.allowGuestNames,
+    hideGuestGallery: !!folderCreds?.hideGuestGallery,
     envConfigured: clientIdConfigured && clientSecretConfigured,
     storageQuota,
     missingEnv: {
@@ -757,6 +819,11 @@ app.get("/api/photos", async (req, res) => {
     let isOwner = false;
     let isCoHost = false;
 
+    const reqCoHostKey = (req.query.key || req.query.cohostKey || req.headers["x-cohost-key"]) as string | undefined;
+    if (creds.coHostKey && reqCoHostKey && reqCoHostKey.trim() === creds.coHostKey.trim()) {
+      isCoHost = true;
+    }
+
     if (ownerCreds && ownerCreds.refreshToken) {
       if (ownerCreds.ownerEmail && creds.ownerEmail && ownerCreds.ownerEmail.toLowerCase() === creds.ownerEmail.toLowerCase()) {
         isOwner = true;
@@ -787,7 +854,7 @@ app.get("/api/photos", async (req, res) => {
 
     const canEdit = isOwner || isCoHost;
     const isHostOrCoHost = isOwner || isCoHost;
-    const userRole = isOwner ? "owner" : (isCoHost ? "editor" : "guest");
+    const userRole = isOwner ? "owner" : (isCoHost ? "cohost" : "guest");
 
     // If a custom folderId is specified, fetch its metadata to get the name
     let folderName = creds.folderName || "App Uploads Gallery";
@@ -839,7 +906,8 @@ app.get("/api/photos", async (req, res) => {
       isCoHost: isCoHost,
       canEdit: canEdit,
       userRole: userRole,
-      userEmail: ownerCreds?.ownerEmail || null,
+      userEmail: ownerCreds?.ownerEmail || (isCoHost ? "Co-Host Moderator" : null),
+      coHostKey: isHostOrCoHost ? creds.coHostKey : undefined,
       coHosts: creds.coHosts || [],
     });
   } catch (err: any) {
@@ -1272,18 +1340,32 @@ app.get("/api/settings", async (req, res) => {
   }
 });
 
-// 13. Update Gallery Settings (owner-only — session gated)
+// 13. Update Gallery Settings (owner or authorized co-host)
 app.post("/api/settings", async (req, res) => {
   const sessionId = (req as any).sessionId;
-  const { allowGuestNames, hideGuestGallery } = req.body;
+  const { allowGuestNames, hideGuestGallery, folderId: reqFolderId, key: bodyKey } = req.body;
+  const reqCoHostKey = (bodyKey || req.headers["x-cohost-key"]) as string | undefined;
   try {
-    const creds = await getSavedCredentials(sessionId);
+    let creds = await getSavedCredentials(sessionId);
+    const targetFolderId = reqFolderId || creds?.folderId;
+    if (!creds && targetFolderId) {
+      const folderCreds = await getSavedCredentialsForFolder(targetFolderId);
+      if (folderCreds && folderCreds.coHostKey && reqCoHostKey && reqCoHostKey.trim() === folderCreds.coHostKey.trim()) {
+        creds = folderCreds;
+      }
+    }
     if (!creds) {
-      return res.status(400).json({ error: "Not authenticated. You must be the gallery owner." });
+      return res.status(400).json({ error: "Not authenticated. You must be the gallery owner or co-host." });
     }
     if (allowGuestNames !== undefined) creds.allowGuestNames = !!allowGuestNames;
     if (hideGuestGallery !== undefined) creds.hideGuestGallery = !!hideGuestGallery;
     await saveCredentials(sessionId, creds);
+    if (targetFolderId) {
+      await updateFolderCredentials(targetFolderId, {
+        allowGuestNames: creds.allowGuestNames,
+        hideGuestGallery: creds.hideGuestGallery,
+      });
+    }
     res.json({
       success: true,
       allowGuestNames: creds.allowGuestNames,
@@ -1307,9 +1389,15 @@ app.get("/api/cohosts", async (req, res) => {
     if (!creds) {
       return res.json({ coHosts: [] });
     }
+    const targetFolderId = queryFolderId || creds.folderId;
+    if (targetFolderId && !creds.coHostKey) {
+      creds.coHostKey = crypto.randomBytes(16).toString("hex");
+      await updateFolderCredentials(targetFolderId, { coHostKey: creds.coHostKey });
+    }
     res.json({
       coHosts: creds.coHosts || [],
-      ownerEmail: creds.ownerEmail || null
+      ownerEmail: creds.ownerEmail || null,
+      coHostKey: creds.coHostKey || undefined,
     });
   } catch (err: any) {
     console.error("Error fetching co-hosts:", err);
