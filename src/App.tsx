@@ -1181,6 +1181,16 @@ export default function App() {
         setHasClickedFolder(true);
         setForceSelectFolderState(false);
         setShowAdminGuide(true);
+
+        const isShared = sharedFolders.some(sf => sf.id === folderId);
+        if (isShared) {
+          setGuestFolderId(folderId);
+          window.history.replaceState({}, "", `${window.location.pathname}?folder=${encodeURIComponent(folderId)}&role=cohost`);
+        } else {
+          setGuestFolderId(null);
+          window.history.replaceState({}, "", window.location.pathname);
+        }
+
         // Refresh status and photos instantly
         setLoadingPhotos(true);
         fetchStatusAndPhotos();
@@ -1224,6 +1234,8 @@ export default function App() {
         setHasClickedFolder(true);
         setForceSelectFolderState(false);
         setShowAdminGuide(true);
+        setGuestFolderId(null);
+        window.history.replaceState({}, "", window.location.pathname);
         setLoadingPhotos(true);
         fetchStatusAndPhotos();
         fetchFoldersList();
