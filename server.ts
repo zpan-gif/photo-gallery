@@ -57,10 +57,34 @@ try {
   console.error("Failed to initialize Firebase Admin SDK:", e);
 }
 
-interface CoHostInfo {
+export interface CoHostPermissions {
+  canTogglePrivacy: boolean;      // Can switch Private Guest View Mode on/off
+  canDeletePhotos: boolean;       // Can trash / delete guest uploads
+  canManageCohosts: boolean;      // Can invite or remove other co-hosts
+  canEditSettings: boolean;       // Can change general album settings (guest names prompt, etc.)
+}
+
+export const DEFAULT_COHOST_PERMISSIONS: CoHostPermissions = {
+  canTogglePrivacy: false,
+  canDeletePhotos: true,
+  canManageCohosts: false,
+  canEditSettings: false,
+};
+
+export function normalizePermissions(p?: Partial<CoHostPermissions>): CoHostPermissions {
+  return {
+    canTogglePrivacy: Boolean(p?.canTogglePrivacy),
+    canDeletePhotos: p?.canDeletePhotos !== undefined ? Boolean(p.canDeletePhotos) : true,
+    canManageCohosts: Boolean(p?.canManageCohosts),
+    canEditSettings: Boolean(p?.canEditSettings),
+  };
+}
+
+export interface CoHostInfo {
   email: string;
   permissionId?: string;
   addedAt: number;
+  permissions?: CoHostPermissions;
 }
 
 interface SavedCredentials {
@@ -74,6 +98,26 @@ interface SavedCredentials {
   coHosts?: CoHostInfo[];
   coHostKey?: string;
 }
+
+const FOLDERS_DATA_PATH = path.join(process.cwd(), "folders-metadata.json");
+
+function getLocalFoldersMetadata(): Record<string, any> {
+  if (fs.existsSync(FOLDERS_DATA_PATH)) {
+    try {
+      return JSON.parse(fs.readFileSync(FOLDERS_DATA_PATH, "utf-8")) || {};
+    } catch {}
+  }
+  return {};
+}
+
+function saveLocalFoldersMetadata(folderId: string, data: any) {
+  try {
+    const existing = getLocalFoldersMetadata();
+    existing[folderId] = { ...(existing[folderId] || {}), ...data };
+    fs.writeFileSync(FOLDERS_DATA_PATH, JSON.stringify(existing, null, 2));
+  } catch (e) {}
+}
+
 
 // Helper to read header values whether headers is a standard Headers object or plain object
 function getResponseHeader(headers: any, name: string): string | null {
@@ -143,6 +187,18 @@ async function saveCredentials(sessionId: string, creds: SavedCredentials) {
   sessionCredentialsCache.set(sessionId, { data: credsWithSession, expires: Date.now() + CACHE_TTL_MS });
   if (creds.folderId) {
     folderCredentialsCache.set(creds.folderId, { data: credsWithSession, expires: Date.now() + CACHE_TTL_MS });
+    saveLocalFoldersMetadata(creds.folderId, {
+      folderId: creds.folderId,
+      folderName: creds.folderName,
+      ownerEmail: creds.ownerEmail,
+      refreshToken: creds.refreshToken,
+      ownerSessionId: sessionId,
+      allowGuestNames: !!creds.allowGuestNames,
+      hideGuestGallery: !!creds.hideGuestGallery,
+      coHosts: creds.coHosts || [],
+      coHostKey: creds.coHostKey || null,
+      updatedAt: Date.now(),
+    });
   }
 
   try {
@@ -157,6 +213,20 @@ async function saveCredentials(sessionId: string, creds: SavedCredentials) {
   }
   try {
     await db.collection("sessions").doc(sessionId).set(credsWithSession, { merge: true });
+    if (creds.folderId) {
+      await db.collection("folders").doc(creds.folderId).set({
+        folderId: creds.folderId,
+        folderName: creds.folderName || "App Uploads Gallery",
+        ownerEmail: creds.ownerEmail || null,
+        refreshToken: creds.refreshToken,
+        ownerSessionId: sessionId,
+        allowGuestNames: !!creds.allowGuestNames,
+        hideGuestGallery: !!creds.hideGuestGallery,
+        coHosts: creds.coHosts || [],
+        coHostKey: creds.coHostKey || null,
+        updatedAt: Date.now(),
+      }, { merge: true });
+    }
   } catch (e) {
     console.error("Error writing credentials to Firestore:", e);
   }
@@ -168,8 +238,16 @@ async function updateFolderCredentials(folderId: string, updates: Partial<SavedC
   if (cached) {
     cached.data = { ...cached.data, ...updates };
   }
+  saveLocalFoldersMetadata(folderId, { ...updates, updatedAt: Date.now() });
+
   if (db) {
     try {
+      await db.collection("folders").doc(folderId).set({
+        ...updates,
+        folderId,
+        updatedAt: Date.now(),
+      }, { merge: true });
+
       const snapshot = await db.collection("sessions").where("folderId", "==", folderId).limit(1).get();
       if (!snapshot.empty) {
         const docId = snapshot.docs[0].id;
@@ -227,24 +305,45 @@ async function getSavedCredentialsForFolder(folderId: string): Promise<SavedCred
     return cached.data;
   }
 
-  if (!db) {
-    console.error("Firebase Firestore is not initialized.");
-    const fileCreds = getFileFallbackCredentials();
-    if (fileCreds && (!fileCreds.folderId || fileCreds.folderId === folderId)) {
-      return fileCreds;
+  // 1. Check dedicated Firestore folders collection
+  if (db) {
+    try {
+      const folderDoc = await db.collection("folders").doc(folderId).get();
+      if (folderDoc.exists) {
+        const data = folderDoc.data() as SavedCredentials;
+        if (data && data.refreshToken) {
+          folderCredentialsCache.set(folderId, { data, expires: Date.now() + CACHE_TTL_MS });
+          return data;
+        }
+      }
+    } catch (e) {
+      console.error("Error querying folders collection in Firestore:", e);
     }
-    return null;
   }
-  try {
-    const snapshot = await db.collection("sessions").where("folderId", "==", folderId).limit(1).get();
-    if (!snapshot.empty) {
-      const data = snapshot.docs[0].data() as SavedCredentials;
-      folderCredentialsCache.set(folderId, { data, expires: Date.now() + CACHE_TTL_MS });
-      return data;
+
+  // 2. Check local folders metadata
+  const localMeta = getLocalFoldersMetadata();
+  if (localMeta && localMeta[folderId] && localMeta[folderId].refreshToken) {
+    const data = localMeta[folderId] as SavedCredentials;
+    folderCredentialsCache.set(folderId, { data, expires: Date.now() + CACHE_TTL_MS });
+    return data;
+  }
+
+  // 3. Fallback to sessions collection in Firestore
+  if (db) {
+    try {
+      const snapshot = await db.collection("sessions").where("folderId", "==", folderId).limit(1).get();
+      if (!snapshot.empty) {
+        const data = snapshot.docs[0].data() as SavedCredentials;
+        folderCredentialsCache.set(folderId, { data, expires: Date.now() + CACHE_TTL_MS });
+        return data;
+      }
+    } catch (e) {
+      console.error("Error querying credentials for folder in Firestore:", e);
     }
-  } catch (e) {
-    console.error("Error querying credentials for folder in Firestore:", e);
   }
+
+  // 4. Fallback to local drive-credentials.json
   const fileCreds = getFileFallbackCredentials();
   if (fileCreds && (!fileCreds.folderId || fileCreds.folderId === folderId)) {
     return fileCreds;
@@ -428,6 +527,13 @@ app.get("/api/status", async (req, res) => {
   let canEdit = false;
   let userRole = "guest";
   let isCoHost = false;
+  let isOwner = false;
+  let coHostPermissions: CoHostPermissions = {
+    canTogglePrivacy: false,
+    canDeletePhotos: false,
+    canManageCohosts: false,
+    canEditSettings: false,
+  };
 
   let folderCreds = targetFolderId ? await getSavedCredentialsForFolder(targetFolderId) : creds;
   if (!folderCreds && creds) {
@@ -451,6 +557,7 @@ app.get("/api/status", async (req, res) => {
     canEdit = true;
     isCoHost = true;
     userRole = "cohost";
+    coHostPermissions = DEFAULT_COHOST_PERMISSIONS;
   }
 
   // 2. Check ownership & Google Drive session capabilities
@@ -458,24 +565,32 @@ app.get("/api/status", async (req, res) => {
     // Is caller the owner?
     const isOwnerAccount = Boolean(
       (folderCreds?.ownerEmail && creds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === creds.ownerEmail.toLowerCase()) ||
-      (!queryFolderId && creds.folderId === targetFolderId)
+      (!queryFolderId && creds.folderId === targetFolderId && (!folderCreds?.ownerEmail || folderCreds.ownerEmail.toLowerCase() === creds.ownerEmail.toLowerCase()))
     );
 
     if (isOwnerAccount) {
       canEdit = true;
       userRole = "owner";
+      isOwner = true;
       isCoHost = false;
+      coHostPermissions = {
+        canTogglePrivacy: true,
+        canDeletePhotos: true,
+        canManageCohosts: true,
+        canEditSettings: true,
+      };
     } else {
       // Check if caller's email is in invited coHosts list
-      const inCoHostsList = Boolean(
-        creds.ownerEmail &&
-        folderCreds?.coHosts?.some(c => c.email.toLowerCase() === creds.ownerEmail!.toLowerCase())
+      const matchingCoHost = creds.ownerEmail && folderCreds?.coHosts?.find(
+        (c) => c.email.toLowerCase() === creds.ownerEmail!.toLowerCase()
       );
 
-      if (inCoHostsList) {
+      if (matchingCoHost) {
         canEdit = true;
         isCoHost = true;
-        userRole = "editor";
+        isOwner = false;
+        userRole = "cohost";
+        coHostPermissions = normalizePermissions(matchingCoHost.permissions);
       } else {
         // Check direct Google Drive capabilities
         try {
@@ -488,11 +603,22 @@ app.get("/api/status", async (req, res) => {
           if (caps?.canEdit || caps?.canDelete || caps?.canAddChildren) {
             canEdit = true;
             isCoHost = true;
-            userRole = "editor";
+            isOwner = false;
+            userRole = "cohost";
+            coHostPermissions = DEFAULT_COHOST_PERMISSIONS;
           }
         } catch (e) {
           // Folder not shared with user or insufficient permissions
         }
+      }
+    }
+  } else if (canEdit && !isOwner) {
+    // If authenticated via key or previously flagged as co-host, look up matching cohost entry for permissions
+    const callerEmail = creds?.ownerEmail?.toLowerCase();
+    if (callerEmail && folderCreds?.coHosts) {
+      const match = folderCreds.coHosts.find((c) => c.email.toLowerCase() === callerEmail);
+      if (match) {
+        coHostPermissions = normalizePermissions(match.permissions);
       }
     }
   }
@@ -539,10 +665,12 @@ app.get("/api/status", async (req, res) => {
     ownerEmail: folderCreds?.ownerEmail || ownerEmail || null,
     userEmail: creds?.ownerEmail || (isCoHost ? "Co-Host Moderator" : (ownerEmail || null)),
     canEdit,
-    isHost: canEdit || userRole === "owner" || isCoHost,
+    isHost: canEdit || isOwner || isCoHost,
+    isOwner,
     isCoHost,
     userRole,
-    coHostKey: (canEdit || isCoHost || userRole === "owner") ? folderCreds?.coHostKey : undefined,
+    coHostPermissions,
+    coHostKey: (canEdit || isCoHost || isOwner) ? folderCreds?.coHostKey : undefined,
     coHosts: folderCreds?.coHosts || [],
     allowGuestNames: !!folderCreds?.allowGuestNames,
     hideGuestGallery: !!folderCreds?.hideGuestGallery,
@@ -1222,20 +1350,31 @@ app.post("/api/delete/:fileId", async (req, res) => {
       folderCreds = userCreds;
     }
 
+    const callerEmail = userCreds?.ownerEmail?.toLowerCase();
     const isOwner = Boolean(
       userCreds?.refreshToken &&
-      ((folderCreds?.ownerEmail && userCreds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === userCreds.ownerEmail.toLowerCase()) ||
+      ((folderCreds?.ownerEmail && callerEmail && folderCreds.ownerEmail.toLowerCase() === callerEmail) ||
        (userCreds.folderId && userCreds.folderId === queryFolderId))
     );
 
-    const isCoHost = Boolean(
+    const matchingCoHost = callerEmail && folderCreds?.coHosts?.find(
+      (c) => c.email.toLowerCase() === callerEmail
+    );
+    const isKeyAuthorized = Boolean(
       folderCreds?.coHostKey &&
       reqCoHostKey &&
       reqCoHostKey.trim() === folderCreds.coHostKey.trim()
     );
 
+    const isCoHost = Boolean(matchingCoHost || isKeyAuthorized);
+    const perms = matchingCoHost ? normalizePermissions(matchingCoHost.permissions) : DEFAULT_COHOST_PERMISSIONS;
+
     if (!isOwner && !isCoHost) {
       return res.status(403).json({ error: "Only the album owner or an authorized co-host can delete photos." });
+    }
+
+    if (isCoHost && !isOwner && !perms.canDeletePhotos) {
+      return res.status(403).json({ error: "Permission denied: The album owner has disabled photo deletion for your co-host role." });
     }
 
     const driveCreds = folderCreds || userCreds;
@@ -1258,37 +1397,140 @@ app.post("/api/delete/:fileId", async (req, res) => {
   }
 });
 
-// 9. List Google Drive Folders
+// 9. List Google Drive Folders (Includes user-owned folders + shared albums where user is a co-host)
 app.get("/api/folders", async (req, res) => {
   const sessionId = (req as any).sessionId;
   try {
     const creds = await getSavedCredentials(sessionId);
     if (!creds) {
-      return res.json({ folders: [] });
+      return res.json({ folders: [], myFolders: [], sharedFolders: [] });
     }
+    const userEmail = (creds.ownerEmail || "").toLowerCase();
     const drive = getAuthorizedDriveClient(creds);
-    let allFolders: any[] = [];
+    let myFolders: any[] = [];
     let folderPageToken: string | undefined = undefined;
 
-    do {
-      const driveRes: any = await drive.files.list({
-        q: "mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-        fields: "nextPageToken, files(id, name)",
-        orderBy: "name",
-        pageSize: 1000,
-        pageToken: folderPageToken,
-      });
-      if (driveRes.data.files && driveRes.data.files.length > 0) {
-        allFolders.push(...driveRes.data.files);
-      }
-      folderPageToken = driveRes.data.nextPageToken || undefined;
-    } while (folderPageToken);
+    // 1. List user's own Drive folders
+    try {
+      do {
+        const driveRes: any = await drive.files.list({
+          q: "mimeType = 'application/vnd.google-apps.folder' and trashed = false and 'me' in owners",
+          fields: "nextPageToken, files(id, name, owners)",
+          orderBy: "name",
+          pageSize: 1000,
+          pageToken: folderPageToken,
+        });
+        if (driveRes.data.files && driveRes.data.files.length > 0) {
+          myFolders.push(...driveRes.data.files);
+        }
+        folderPageToken = driveRes.data.nextPageToken || undefined;
+      } while (folderPageToken);
+    } catch (err: any) {
+      console.warn("My drive folder scan with 'me' in owners failed, falling back to general folder query:", err.message);
+      try {
+        const fallbackRes: any = await drive.files.list({
+          q: "mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+          fields: "files(id, name)",
+          pageSize: 1000,
+        });
+        if (fallbackRes.data.files) {
+          myFolders = fallbackRes.data.files;
+        }
+      } catch (e) {}
+    }
 
-    res.json({ folders: allFolders });
+    // 2. Discover shared folders where user is an invited Co-Host
+    const sharedFolderMap = new Map<string, any>();
+
+    // From Firestore 'folders' collection
+    if (db && userEmail) {
+      try {
+        const allDocs = await db.collection("folders").get();
+        allDocs.forEach((doc) => {
+          const fData = doc.data();
+          if (fData && fData.folderId && Array.isArray(fData.coHosts)) {
+            const match = fData.coHosts.find(
+              (c: any) => c.email && c.email.toLowerCase() === userEmail
+            );
+            if (match) {
+              sharedFolderMap.set(fData.folderId, {
+                id: fData.folderId,
+                name: fData.folderName || "Shared Album",
+                ownerEmail: fData.ownerEmail || "Album Host",
+                isCoHost: true,
+                permissions: normalizePermissions(match.permissions),
+              });
+            }
+          }
+        });
+      } catch (e) {
+        console.error("Error querying co-hosted folders in Firestore:", e);
+      }
+    }
+
+    // From local folders metadata fallback
+    if (userEmail) {
+      const localData = getLocalFoldersMetadata();
+      for (const fId of Object.keys(localData)) {
+        const item = localData[fId];
+        if (item && Array.isArray(item.coHosts)) {
+          const match = item.coHosts.find(
+            (c: any) => c.email && c.email.toLowerCase() === userEmail
+          );
+          if (match && !sharedFolderMap.has(fId)) {
+            sharedFolderMap.set(fId, {
+              id: fId,
+              name: item.folderName || "Shared Album",
+              ownerEmail: item.ownerEmail || "Album Host",
+              isCoHost: true,
+              permissions: normalizePermissions(match.permissions),
+            });
+          }
+        }
+      }
+    }
+
+    // From Google Drive 'sharedWithMe'
+    try {
+      const sharedDriveRes: any = await drive.files.list({
+        q: "mimeType = 'application/vnd.google-apps.folder' and sharedWithMe = true and trashed = false",
+        fields: "files(id, name, owners)",
+        pageSize: 100,
+      });
+      if (sharedDriveRes.data.files) {
+        for (const sf of sharedDriveRes.data.files) {
+          if (!sharedFolderMap.has(sf.id)) {
+            const ownerObj = sf.owners && sf.owners[0];
+            sharedFolderMap.set(sf.id, {
+              id: sf.id,
+              name: sf.name,
+              ownerEmail: ownerObj?.emailAddress || "Google Drive Shared",
+              isCoHost: true,
+              permissions: DEFAULT_COHOST_PERMISSIONS,
+            });
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn("SharedWithMe Drive query warning:", e.message);
+    }
+
+    const sharedFolders = Array.from(sharedFolderMap.values());
+    const allFoldersCombined = [...myFolders];
+    for (const sf of sharedFolders) {
+      if (!allFoldersCombined.some((f) => f.id === sf.id)) {
+        allFoldersCombined.push({ id: sf.id, name: sf.name, isShared: true });
+      }
+    }
+
+    res.json({
+      folders: allFoldersCombined,
+      myFolders,
+      sharedFolders,
+    });
   } catch (err: any) {
     console.error("Error listing folders:", err);
-    // If we're on limited drive.file scope, full folder scan is restricted. Return an empty list gracefully
-    res.json({ folders: [], limitedScope: true, warning: err.message || "Limited Scope" });
+    res.json({ folders: [], myFolders: [], sharedFolders: [], limitedScope: true, warning: err.message || "Limited Scope" });
   }
 });
 
@@ -1307,6 +1549,18 @@ app.post("/api/folders/select", async (req, res) => {
     creds.folderId = folderId;
     creds.folderName = folderName;
     await saveCredentials(sessionId, creds);
+
+    // If caller is primary owner of this folder, also ensure folder document is kept up to date
+    const folderCreds = await getSavedCredentialsForFolder(folderId);
+    if (!folderCreds || (folderCreds.ownerEmail && creds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === creds.ownerEmail.toLowerCase())) {
+      await updateFolderCredentials(folderId, {
+        folderId,
+        folderName,
+        ownerEmail: creds.ownerEmail,
+        ownerSessionId: sessionId,
+      });
+    }
+
     res.json({ success: true, folderId, folderName });
   } catch (err: any) {
     console.error("Folder select error:", err);
@@ -1372,7 +1626,7 @@ app.get("/api/settings", async (req, res) => {
   }
 });
 
-// 13. Update Gallery Settings (owner or authorized co-host)
+// 13. Update Gallery Settings (owner or authorized co-host with permission)
 app.post("/api/settings", async (req, res) => {
   const sessionId = (req as any).sessionId;
   const { allowGuestNames, hideGuestGallery, folderId: reqFolderId, key: bodyKey } = req.body;
@@ -1380,28 +1634,66 @@ app.post("/api/settings", async (req, res) => {
   try {
     let creds = await getSavedCredentials(sessionId);
     const targetFolderId = reqFolderId || creds?.folderId;
+    let folderCreds = targetFolderId ? await getSavedCredentialsForFolder(targetFolderId) : creds;
+    if (!folderCreds && creds) folderCreds = creds;
+
     if (!creds && targetFolderId) {
-      const folderCreds = await getSavedCredentialsForFolder(targetFolderId);
       if (folderCreds && folderCreds.coHostKey && reqCoHostKey && reqCoHostKey.trim() === folderCreds.coHostKey.trim()) {
         creds = folderCreds;
       }
     }
-    if (!creds) {
-      return res.status(400).json({ error: "Not authenticated. You must be the gallery owner or co-host." });
+    if (!creds && !folderCreds) {
+      return res.status(401).json({ error: "Not authenticated. You must be signed in to modify settings." });
     }
-    if (allowGuestNames !== undefined) creds.allowGuestNames = !!allowGuestNames;
-    if (hideGuestGallery !== undefined) creds.hideGuestGallery = !!hideGuestGallery;
-    await saveCredentials(sessionId, creds);
+
+    const callerEmail = creds?.ownerEmail?.toLowerCase();
+    const isOwner = Boolean(
+      folderCreds?.ownerEmail && callerEmail && folderCreds.ownerEmail.toLowerCase() === callerEmail
+    ) || Boolean(
+      creds?.refreshToken && !reqFolderId && creds.folderId === targetFolderId
+    );
+
+    const matchingCoHost = callerEmail && folderCreds?.coHosts?.find(
+      (c) => c.email.toLowerCase() === callerEmail
+    );
+    const perms = matchingCoHost ? normalizePermissions(matchingCoHost.permissions) : DEFAULT_COHOST_PERMISSIONS;
+
+    // Check Privacy toggle permission (hideGuestGallery)
+    if (hideGuestGallery !== undefined) {
+      if (!isOwner && !perms.canTogglePrivacy) {
+        return res.status(403).json({
+          error: "Permission denied: The album owner has restricted Private Guest View Mode changes for co-hosts."
+        });
+      }
+      if (folderCreds) folderCreds.hideGuestGallery = !!hideGuestGallery;
+      if (creds) creds.hideGuestGallery = !!hideGuestGallery;
+    }
+
+    // Check General album settings permission (allowGuestNames)
+    if (allowGuestNames !== undefined) {
+      if (!isOwner && !perms.canEditSettings) {
+        return res.status(403).json({
+          error: "Permission denied: Only the album owner can edit general guest settings."
+        });
+      }
+      if (folderCreds) folderCreds.allowGuestNames = !!allowGuestNames;
+      if (creds) creds.allowGuestNames = !!allowGuestNames;
+    }
+
+    if (creds && creds.ownerSessionId === sessionId) {
+      await saveCredentials(sessionId, creds);
+    }
     if (targetFolderId) {
       await updateFolderCredentials(targetFolderId, {
-        allowGuestNames: creds.allowGuestNames,
-        hideGuestGallery: creds.hideGuestGallery,
+        allowGuestNames: folderCreds?.allowGuestNames,
+        hideGuestGallery: folderCreds?.hideGuestGallery,
       });
     }
+
     res.json({
       success: true,
-      allowGuestNames: creds.allowGuestNames,
-      hideGuestGallery: creds.hideGuestGallery
+      allowGuestNames: !!folderCreds?.allowGuestNames,
+      hideGuestGallery: !!folderCreds?.hideGuestGallery,
     });
   } catch (err: any) {
     console.error("Error saving settings:", err);
@@ -1426,8 +1718,14 @@ app.get("/api/cohosts", async (req, res) => {
       creds.coHostKey = crypto.randomBytes(16).toString("hex");
       await updateFolderCredentials(targetFolderId, { coHostKey: creds.coHostKey });
     }
+
+    const normalizedCoHosts = (creds.coHosts || []).map(c => ({
+      ...c,
+      permissions: normalizePermissions(c.permissions),
+    }));
+
     res.json({
-      coHosts: creds.coHosts || [],
+      coHosts: normalizedCoHosts,
       ownerEmail: creds.ownerEmail || null,
       coHostKey: creds.coHostKey || undefined,
     });
@@ -1437,14 +1735,14 @@ app.get("/api/cohosts", async (req, res) => {
   }
 });
 
-// 15. Invite Co-Host (Owner only: sets Google Drive permission + saves to coHosts)
+// 15. Invite Co-Host (Owner or Co-Host with canManageCohosts: sets Google Drive permission + saves with permissions)
 app.post("/api/cohosts", async (req, res) => {
   const sessionId = (req as any).sessionId;
-  const { email, folderId: reqFolderId } = req.body;
+  const { email, folderId: reqFolderId, permissions } = req.body;
   try {
     const creds = await getSavedCredentials(sessionId);
     if (!creds || !creds.refreshToken) {
-      return res.status(401).json({ error: "Only the album owner can invite co-hosts." });
+      return res.status(401).json({ error: "Only the album owner or an authorized manager can invite co-hosts." });
     }
 
     const folderId = reqFolderId || creds.folderId;
@@ -1452,26 +1750,46 @@ app.post("/api/cohosts", async (req, res) => {
       return res.status(400).json({ error: "No active Google Drive folder selected." });
     }
 
+    let folderCreds = await getSavedCredentialsForFolder(folderId);
+    if (!folderCreds && creds) folderCreds = creds;
+
+    const callerEmail = creds?.ownerEmail?.toLowerCase();
+    const isOwner = Boolean(
+      folderCreds?.ownerEmail && callerEmail && folderCreds.ownerEmail.toLowerCase() === callerEmail
+    ) || Boolean(
+      creds.folderId === folderId
+    );
+
+    const matchingCoHost = callerEmail && folderCreds?.coHosts?.find(
+      (c) => c.email.toLowerCase() === callerEmail
+    );
+    const perms = matchingCoHost ? normalizePermissions(matchingCoHost.permissions) : DEFAULT_COHOST_PERMISSIONS;
+
+    if (!isOwner && !perms.canManageCohosts) {
+      return res.status(403).json({ error: "Permission denied: Only the album owner can invite new co-hosts." });
+    }
+
     const cleanEmail = (email || "").toString().trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes("@") || !cleanEmail.includes(".")) {
       return res.status(400).json({ error: "Please provide a valid email address." });
     }
 
-    if (creds.ownerEmail && cleanEmail === creds.ownerEmail.toLowerCase()) {
-      return res.status(400).json({ error: "You are already the owner of this album." });
+    if (folderCreds?.ownerEmail && cleanEmail === folderCreds.ownerEmail.toLowerCase()) {
+      return res.status(400).json({ error: "This email is already the owner of this album." });
     }
 
-    const currentCoHosts: CoHostInfo[] = creds.coHosts || [];
+    const currentCoHosts: CoHostInfo[] = folderCreds?.coHosts || [];
     if (currentCoHosts.some(c => c.email.toLowerCase() === cleanEmail)) {
       return res.status(400).json({ error: `${cleanEmail} is already invited as a co-host.` });
     }
 
     // Call Google Drive API to grant writer (Editor) permissions
-    const drive = getAuthorizedDriveClient(creds);
+    const driveCreds = folderCreds || creds;
     let permissionId: string | undefined = undefined;
     let driveShared = false;
 
     try {
+      const drive = getAuthorizedDriveClient(driveCreds);
       const permRes = await drive.permissions.create({
         fileId: folderId,
         sendNotificationEmail: true,
@@ -1489,15 +1807,20 @@ app.post("/api/cohosts", async (req, res) => {
       console.warn("Drive permissions.create warning (saving to app co-hosts anyway):", driveErr.message);
     }
 
+    const coHostPermissions = normalizePermissions(permissions);
+
     const newCoHost: CoHostInfo = {
       email: cleanEmail,
       permissionId,
       addedAt: Date.now(),
+      permissions: coHostPermissions,
     };
 
     const updatedCoHosts = [...currentCoHosts, newCoHost];
-    creds.coHosts = updatedCoHosts;
-    await saveCredentials(sessionId, creds);
+    if (creds.folderId === folderId) {
+      creds.coHosts = updatedCoHosts;
+      await saveCredentials(sessionId, creds);
+    }
     await updateFolderCredentials(folderId, { coHosts: updatedCoHosts });
 
     res.json({
@@ -1506,7 +1829,7 @@ app.post("/api/cohosts", async (req, res) => {
       driveShared,
       message: driveShared
         ? `Co-host invited! Google Drive sent an invite to ${cleanEmail}.`
-        : `Co-host added! ${cleanEmail} can now moderate when signed in.`
+        : `Co-host added! ${cleanEmail} can now open this album when logged in.`
     });
   } catch (err: any) {
     console.error("Error inviting co-host:", err);
@@ -1514,7 +1837,58 @@ app.post("/api/cohosts", async (req, res) => {
   }
 });
 
-// 16. Remove Co-Host (Owner only)
+// 16. Update Co-Host Permissions (Owner only)
+app.put("/api/cohosts/permissions", async (req, res) => {
+  const sessionId = (req as any).sessionId;
+  const { email, folderId: reqFolderId, permissions } = req.body;
+  try {
+    const creds = await getSavedCredentials(sessionId);
+    const folderId = reqFolderId || creds?.folderId;
+    if (!folderId) {
+      return res.status(400).json({ error: "No active Google Drive folder selected." });
+    }
+
+    let folderCreds = await getSavedCredentialsForFolder(folderId);
+    if (!folderCreds && creds) folderCreds = creds;
+
+    const callerEmail = creds?.ownerEmail?.toLowerCase();
+    const isOwner = Boolean(
+      folderCreds?.ownerEmail && callerEmail && folderCreds.ownerEmail.toLowerCase() === callerEmail
+    ) || Boolean(
+      creds?.refreshToken && creds.folderId === folderId
+    );
+
+    if (!isOwner) {
+      return res.status(403).json({ error: "Only the album owner can modify co-host permissions." });
+    }
+
+    const cleanEmail = (email || "").toString().trim().toLowerCase();
+    const currentCoHosts: CoHostInfo[] = folderCreds?.coHosts || [];
+    const target = currentCoHosts.find(c => c.email.toLowerCase() === cleanEmail);
+    if (!target) {
+      return res.status(404).json({ error: "Co-host not found in this album." });
+    }
+
+    target.permissions = normalizePermissions(permissions);
+
+    if (creds && creds.folderId === folderId) {
+      creds.coHosts = currentCoHosts;
+      await saveCredentials(sessionId, creds);
+    }
+    await updateFolderCredentials(folderId, { coHosts: currentCoHosts });
+
+    res.json({
+      success: true,
+      coHosts: currentCoHosts,
+      message: `Updated permissions for ${cleanEmail}.`
+    });
+  } catch (err: any) {
+    console.error("Error updating co-host permissions:", err);
+    res.status(500).json({ error: err.message || "Failed to update permissions." });
+  }
+});
+
+// 17. Remove Co-Host (Owner only)
 app.delete("/api/cohosts", async (req, res) => {
   const sessionId = (req as any).sessionId;
   const { email, folderId: reqFolderId } = req.body;
@@ -1529,13 +1903,33 @@ app.delete("/api/cohosts", async (req, res) => {
       return res.status(400).json({ error: "No active Google Drive folder selected." });
     }
 
+    let folderCreds = await getSavedCredentialsForFolder(folderId);
+    if (!folderCreds && creds) folderCreds = creds;
+
+    const callerEmail = creds?.ownerEmail?.toLowerCase();
+    const isOwner = Boolean(
+      folderCreds?.ownerEmail && callerEmail && folderCreds.ownerEmail.toLowerCase() === callerEmail
+    ) || Boolean(
+      creds.folderId === folderId
+    );
+
+    const matchingCoHost = callerEmail && folderCreds?.coHosts?.find(
+      (c) => c.email.toLowerCase() === callerEmail
+    );
+    const perms = matchingCoHost ? normalizePermissions(matchingCoHost.permissions) : DEFAULT_COHOST_PERMISSIONS;
+
+    if (!isOwner && !perms.canManageCohosts) {
+      return res.status(403).json({ error: "Permission denied: Only the album owner can remove co-hosts." });
+    }
+
     const cleanEmail = (email || "").toString().trim().toLowerCase();
-    const currentCoHosts: CoHostInfo[] = creds.coHosts || [];
+    const currentCoHosts: CoHostInfo[] = folderCreds?.coHosts || [];
     const target = currentCoHosts.find(c => c.email.toLowerCase() === cleanEmail);
 
     if (target && target.permissionId) {
       try {
-        const drive = getAuthorizedDriveClient(creds);
+        const driveCreds = folderCreds || creds;
+        const drive = getAuthorizedDriveClient(driveCreds);
         await drive.permissions.delete({
           fileId: folderId,
           permissionId: target.permissionId,
@@ -1546,8 +1940,10 @@ app.delete("/api/cohosts", async (req, res) => {
     }
 
     const updatedCoHosts = currentCoHosts.filter(c => c.email.toLowerCase() !== cleanEmail);
-    creds.coHosts = updatedCoHosts;
-    await saveCredentials(sessionId, creds);
+    if (creds.folderId === folderId) {
+      creds.coHosts = updatedCoHosts;
+      await saveCredentials(sessionId, creds);
+    }
     await updateFolderCredentials(folderId, { coHosts: updatedCoHosts });
 
     res.json({

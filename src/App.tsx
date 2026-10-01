@@ -39,15 +39,33 @@ import {
   UserPlus,
   ShieldCheck,
   Mail,
-  UserCheck
+  UserCheck,
+  Eye,
+  ShieldAlert
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { QRCodeSVG } from "qrcode.react";
 
-interface CoHostInfo {
+export interface CoHostPermissions {
+  canTogglePrivacy: boolean;
+  canDeletePhotos: boolean;
+  canManageCohosts: boolean;
+  canEditSettings: boolean;
+}
+
+export interface CoHostInfo {
   email: string;
   permissionId?: string;
   addedAt: number;
+  permissions?: CoHostPermissions;
+}
+
+export interface SharedFolderItem {
+  id: string;
+  name: string;
+  ownerEmail: string;
+  isCoHost?: boolean;
+  permissions?: CoHostPermissions;
 }
 
 interface Photo {
@@ -66,11 +84,13 @@ interface ServerStatus {
   ownerEmail?: string | null;
   userEmail?: string | null;
   isHost?: boolean;
+  isOwner?: boolean;
   isCoHost?: boolean;
   canEdit?: boolean;
   userRole?: string;
   coHostKey?: string;
   coHosts?: CoHostInfo[];
+  coHostPermissions?: CoHostPermissions;
   envConfigured: boolean;
   storageQuota?: {
     limit: string;
@@ -293,13 +313,23 @@ export default function App() {
   const [localMediaBlobs, setLocalMediaBlobs] = useState<Record<string, string>>({});
 
   const isCoHost = Boolean(status?.isCoHost || (isCoHostRoleUrl && (status?.isHost || status?.canEdit)));
-  const isOwner = Boolean((status?.connected ?? false) && (status?.userRole === "owner" || (!isCoHost && !guestFolderId)));
+  const isOwner = Boolean(
+    (status?.connected ?? false) &&
+    (status?.isOwner !== undefined ? status.isOwner : (status?.userRole === "owner" || (!isCoHost && !guestFolderId)))
+  );
+
   const canModerate = Boolean(
     isOwner ||
     isCoHost ||
     status?.isHost ||
     status?.canEdit
   );
+
+  // Specific granular permissions:
+  const canTogglePrivacy = Boolean(isOwner || (isCoHost && status?.coHostPermissions?.canTogglePrivacy));
+  const canDeletePhotos = Boolean(isOwner || (isCoHost && status?.coHostPermissions?.canDeletePhotos !== false) || (!isCoHost && canModerate));
+  const canManageCohosts = Boolean(isOwner || (isCoHost && status?.coHostPermissions?.canManageCohosts));
+  const canEditSettings = Boolean(isOwner || (isCoHost && status?.coHostPermissions?.canEditSettings));
 
   // Host View: Shown to owners and co-hosts with full album management rights
   const isHostView = Boolean(
@@ -337,6 +367,13 @@ export default function App() {
   const [invitingCoHost, setInvitingCoHost] = useState(false);
   const [removingCoHostEmail, setRemovingCoHostEmail] = useState<string | null>(null);
   const [copiedCoHostLink, setCopiedCoHostLink] = useState(false);
+  const [invitePermissions, setInvitePermissions] = useState<CoHostPermissions>({
+    canTogglePrivacy: false,
+    canDeletePhotos: true,
+    canManageCohosts: false,
+    canEditSettings: false,
+  });
+  const [updatingPermsEmail, setUpdatingPermsEmail] = useState<string | null>(null);
 
   // Administrative Setup states
   const [showAdminGuide, setShowAdminGuide] = useState(false);
@@ -345,6 +382,7 @@ export default function App() {
   const useFullScope = false;
   const [isLimitedScope, setIsLimitedScope] = useState(false);
   const [folders, setFolders] = useState<DriveFolder[]>([]);
+  const [sharedFolders, setSharedFolders] = useState<SharedFolderItem[]>([]);
   const [loadingFolders, setLoadingFolders] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -583,6 +621,7 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setFolders(data.folders || []);
+        setSharedFolders(data.sharedFolders || []);
         setIsLimitedScope(!!data.limitedScope);
       }
     } catch (err) {
@@ -692,7 +731,12 @@ export default function App() {
           "Content-Type": "application/json",
           ...(activeKey ? { "x-cohost-key": activeKey } : {})
         },
-        body: JSON.stringify({ email, folderId: activeFolder, key: activeKey }),
+        body: JSON.stringify({
+          email,
+          folderId: activeFolder,
+          key: activeKey,
+          permissions: invitePermissions,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -705,6 +749,46 @@ export default function App() {
       setErrorMsg(err.message || "Failed to invite co-host.");
     } finally {
       setInvitingCoHost(false);
+    }
+  };
+
+  const handleUpdateCoHostPermissions = async (email: string, permsPatch: Partial<CoHostPermissions>) => {
+    const activeFolder = guestFolderId || status?.folderId;
+    const activeKey = status?.coHostKey || coHostKey || (activeFolder ? localStorage.getItem(`cohost_key_${activeFolder}`) : null);
+    const target = coHosts.find(c => c.email.toLowerCase() === email.toLowerCase());
+    if (!target) return;
+    const updated = {
+      canTogglePrivacy: permsPatch.canTogglePrivacy !== undefined ? permsPatch.canTogglePrivacy : Boolean(target.permissions?.canTogglePrivacy),
+      canDeletePhotos: permsPatch.canDeletePhotos !== undefined ? permsPatch.canDeletePhotos : (target.permissions?.canDeletePhotos !== false),
+      canManageCohosts: permsPatch.canManageCohosts !== undefined ? permsPatch.canManageCohosts : Boolean(target.permissions?.canManageCohosts),
+      canEditSettings: permsPatch.canEditSettings !== undefined ? permsPatch.canEditSettings : Boolean(target.permissions?.canEditSettings),
+    };
+
+    setUpdatingPermsEmail(email);
+    try {
+      const res = await fetch("/api/cohosts/permissions", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...(activeKey ? { "x-cohost-key": activeKey } : {})
+        },
+        body: JSON.stringify({
+          email,
+          folderId: activeFolder,
+          key: activeKey,
+          permissions: updated,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to update permissions.");
+      }
+      setCoHosts(data.coHosts || []);
+      setSuccessMsg(`Permissions updated for ${email}`);
+    } catch (err: any) {
+      setErrorMsg(err.message || "Failed to update permissions.");
+    } finally {
+      setUpdatingPermsEmail(null);
     }
   };
 
@@ -2928,8 +3012,60 @@ export default function App() {
                                   </div>
                                 ) : (
                                   <div className="max-h-56 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl p-1.5 bg-white dark:bg-slate-900 space-y-1 scrollbar-thin">
+                                    {/* Co-Host Shared Folders Section */}
+                                    {sharedFolders.length > 0 && (
+                                      <div className="space-y-1 mb-2">
+                                        <div className="px-2 py-1 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider font-mono flex items-center gap-1.5">
+                                          <ShieldAlert className="h-3 w-3 shrink-0" />
+                                          <span>Shared With You (Co-Host)</span>
+                                        </div>
+                                        {sharedFolders.map((sf) => {
+                                          const isSelected = status?.folderId === sf.id;
+                                          return (
+                                            <button
+                                              key={`shared-${sf.id}`}
+                                              onClick={async (e) => {
+                                                e.stopPropagation();
+                                                await handleSelectFolder(sf.id, sf.name);
+                                                setShowFolderDropdown(false);
+                                                setShowAdminGuide(true);
+                                              }}
+                                              className={`w-full text-left p-2.5 rounded-xl transition-all flex items-center justify-between cursor-pointer border ${isSelected
+                                                ? "bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200 font-bold"
+                                                : "bg-slate-50/40 dark:bg-slate-950/40 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent text-slate-800 dark:text-slate-200"
+                                                }`}
+                                            >
+                                              <div className="flex items-center gap-2.5 min-w-0">
+                                                <FolderOpen className={`h-4 w-4 shrink-0 ${isSelected ? "text-indigo-600 dark:text-indigo-400" : "text-indigo-500"}`} />
+                                                <div className="min-w-0">
+                                                  <span className="text-xs truncate block">{sf.name}</span>
+                                                  <span className="text-[10px] text-slate-400 block truncate">
+                                                    {sf.ownerEmail ? `By ${sf.ownerEmail}` : "Co-Host Album"}
+                                                  </span>
+                                                </div>
+                                              </div>
+                                              {isSelected ? (
+                                                <span className="text-[10px] font-extrabold text-indigo-600 dark:text-indigo-400 bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 rounded-full font-mono">Active</span>
+                                              ) : (
+                                                <ChevronRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                              )}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+
+                                    {/* Personal Drive Folders Section */}
+                                    {sharedFolders.length > 0 && (
+                                      <div className="px-2 pt-1.5 pb-0.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">
+                                        Your Drive Folders
+                                      </div>
+                                    )}
+
                                     {folders.map((fld) => {
                                       if (fld.name === "App Uploads Gallery") return null;
+                                      // Avoid duplicating if folder is already shown in sharedFolders
+                                      if (sharedFolders.some(sf => sf.id === fld.id)) return null;
                                       const isSelected = status?.folderId === fld.id;
                                       return (
                                         <button
@@ -3012,37 +3148,50 @@ export default function App() {
                             <div className="flex items-center gap-2">
                               <Users className="h-4 w-4 text-indigo-500 shrink-0" />
                               <p className="text-sm font-bold text-slate-900 dark:text-slate-100">Allow guest names on uploads</p>
+                              {!canEditSettings && (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 font-mono">
+                                  Owner Controlled
+                                </span>
+                              )}
                             </div>
                             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed pl-6">
-                              When on, guests can optionally enter their name before uploading. It will show as a &ldquo;Posted by&rdquo; byline on each photo card in the gallery.
+                              {canEditSettings
+                                ? "When on, guests can optionally enter their name before uploading. It will show as a “Posted by” byline on each photo card in the gallery."
+                                : "Only the album owner (or co-hosts with settings permission) can change guest name settings."}
                             </p>
                           </div>
                           {/* Toggle Switch */}
                           <button
+                            disabled={!canEditSettings}
                             onClick={async (e) => {
                               e.stopPropagation();
+                              if (!canEditSettings) return;
                               const next = !allowGuestNames;
                               setAllowGuestNames(next);
                               try {
-                                await fetch("/api/settings", {
+                                const res = await fetch("/api/settings", {
                                   method: "POST",
                                   headers: { "Content-Type": "application/json" },
                                   body: JSON.stringify({ allowGuestNames: next }),
                                 });
+                                if (!res.ok) {
+                                  const err = await res.json();
+                                  throw new Error(err.error || "Failed to save settings");
+                                }
                                 setSuccessMsg(next ? "Guest name prompts are now enabled." : "Guest name prompts have been turned off.");
-                              } catch (e) {
+                              } catch (e: any) {
                                 setAllowGuestNames(!next); // revert on failure
-                                setErrorMsg("Failed to save settings.");
+                                setErrorMsg(e.message || "Failed to save settings.");
                               }
                             }}
-                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 transition-colors focus:outline-none cursor-pointer ${allowGuestNames
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 transition-colors focus:outline-none ${!canEditSettings ? "opacity-50 cursor-not-allowed" : "cursor-pointer"} ${allowGuestNames
                               ? "bg-indigo-600 border-indigo-600"
                               : "bg-slate-200 border-slate-200"
                               }`}
                             role="switch"
                             aria-checked={allowGuestNames}
                             id="guest_names_toggle_button"
-                            title={allowGuestNames ? "Turn off guest name prompts" : "Turn on guest name prompts"}
+                            title={!canEditSettings ? "Requires permission from album owner" : (allowGuestNames ? "Turn off guest name prompts" : "Turn on guest name prompts")}
                           >
                             <span
                               className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${allowGuestNames ? "translate-x-5" : "translate-x-0.5"
@@ -3065,38 +3214,51 @@ export default function App() {
                             <div className="flex items-center gap-2">
                               <Lock className="h-4 w-4 text-amber-500 shrink-0" />
                               <p className="text-sm font-bold text-slate-900 dark:text-slate-100">Private Guest View Mode</p>
+                              {!canTogglePrivacy && (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 font-mono">
+                                  Owner Controlled
+                                </span>
+                              )}
                             </div>
                             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed pl-6">
-                              When active, guests only see photos they have uploaded throughout their stay. As the host, you will still see all photos from everyone.
+                              {canTogglePrivacy
+                                ? "When active, guests only see photos they have uploaded throughout their stay. As the host, you will still see all photos from everyone."
+                                : "Only the album owner (or co-hosts with privacy permissions) can toggle Private Guest View Mode."}
                             </p>
                           </div>
                           {/* Toggle Switch */}
                           <button
+                            disabled={!canTogglePrivacy}
                             onClick={async (e) => {
                               e.stopPropagation();
+                              if (!canTogglePrivacy) return;
                               const next = !hideGuestGallery;
                               setHideGuestGallery(next);
                               try {
-                                await fetch("/api/settings", {
+                                const res = await fetch("/api/settings", {
                                   method: "POST",
                                   headers: { "Content-Type": "application/json" },
                                   body: JSON.stringify({ hideGuestGallery: next }),
                                 });
+                                if (!res.ok) {
+                                  const err = await res.json();
+                                  throw new Error(err.error || "Failed to save settings");
+                                }
                                 setSuccessMsg(next ? "Private Guest View Mode is now ON. Guests only see their own uploads." : "Private Guest View Mode is OFF. Guests can see the full shared album.");
                                 fetchStatusAndPhotos();
-                              } catch (e) {
+                              } catch (e: any) {
                                 setHideGuestGallery(!next); // revert on failure
-                                setErrorMsg("Failed to save settings.");
+                                setErrorMsg(e.message || "Failed to save settings.");
                               }
                             }}
-                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 transition-colors focus:outline-none cursor-pointer ${hideGuestGallery
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 transition-colors focus:outline-none ${!canTogglePrivacy ? "opacity-50 cursor-not-allowed" : "cursor-pointer"} ${hideGuestGallery
                               ? "bg-amber-500 border-amber-500"
                               : "bg-slate-200 border-slate-200"
                               }`}
                             role="switch"
                             aria-checked={hideGuestGallery}
                             id="private_mode_toggle_button"
-                            title={hideGuestGallery ? "Turn off Private Guest View Mode" : "Turn on Private Guest View Mode"}
+                            title={!canTogglePrivacy ? "Requires permission from album owner" : (hideGuestGallery ? "Turn off Private Guest View Mode" : "Turn on Private Guest View Mode")}
                           >
                             <span
                               className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${hideGuestGallery ? "translate-x-5" : "translate-x-0.5"
@@ -3267,6 +3429,19 @@ export default function App() {
                         </span>
                       )}
                     </button>
+
+                    {/* Preview Guest View Button */}
+                    <a
+                      href={getPublicGuestUrl(status.folderId!)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="w-full mt-0.5 bg-slate-50/80 dark:bg-slate-800/40 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold text-xs py-2 px-4 rounded-xl border border-slate-200/60 dark:border-slate-800 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-3xs active:scale-98"
+                      id="preview_guest_view_btn"
+                      title="Open guest gallery experience in a new tab"
+                    >
+                      <Eye className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400" />
+                      <span>Preview Guest View</span>
+                    </a>
                   </div>
                 </div>
               )}
@@ -3502,8 +3677,8 @@ export default function App() {
             {renderOnboardingStepsHeader(1)}
             {renderInstructionsPlaybook()}
           </div>
-        ) : status?.connected && (!status?.folderId || status?.folderName === "App Uploads Gallery" || forceSelectFolderState) && !guestFolderId && isOwner ? (
-          /* FORCED FOLDER CONFIGURATION CARD FOR OWNER */
+        ) : status?.connected && (!status?.folderId || status?.folderName === "App Uploads Gallery" || forceSelectFolderState) && !guestFolderId && (isOwner || isCoHost) ? (
+          /* FORCED FOLDER CONFIGURATION CARD FOR OWNER OR CO-HOST */
           <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-[32px] p-6 sm:p-10 shadow-xs max-w-lg mx-auto space-y-6 animate-fade-in" id="forced_folder_activation">
             {renderOnboardingStepsHeader(2)}
 
@@ -3515,7 +3690,7 @@ export default function App() {
                     setForceSelectFolderState(false);
                     setShowAdminGuide(true);
                   }}
-                  className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-slate-900 dark:hover:text-white transition-all cursor-pointer px-4 py-2 rounded-full border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950"
+                  className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-slate-900 dark:hover:white transition-all cursor-pointer px-4 py-2 rounded-full border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950"
                 >
                   <ChevronLeft className="h-4 w-4" />
                   <span>Back to Storage Settings</span>
@@ -3586,16 +3761,50 @@ export default function App() {
                     <RefreshCw className="h-4 w-4 text-slate-450 animate-spin" />
                     <span className="text-xs text-slate-400">Loading folders...</span>
                   </div>
-                ) : folders.length === 0 ? (
+                ) : folders.length === 0 && sharedFolders.length === 0 ? (
                   <div className="p-8 border border-slate-150 dark:border-slate-800 border-dashed rounded-2xl text-center bg-slate-50/50">
                     <p className="text-xs text-slate-500 dark:text-slate-400">No Drive folders found.</p>
                   </div>
                 ) : (
-                  <div className="max-h-52 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl p-2 bg-slate-50/30 dark:bg-slate-950/20 space-y-1.5 scrollbar-thin">
+                  <div className="max-h-60 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl p-2 bg-slate-50/30 dark:bg-slate-950/20 space-y-2 scrollbar-thin">
+                    {/* Shared / Co-Host Albums */}
+                    {sharedFolders.length > 0 && (
+                      <div className="space-y-1.5 mb-2">
+                        <div className="px-2 py-1 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider font-mono flex items-center gap-1.5">
+                          <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+                          <span>Shared With You (Co-Host)</span>
+                        </div>
+                        {sharedFolders.map((sf) => (
+                          <button
+                            key={`onboarding-shared-${sf.id}`}
+                            onClick={() => handleSelectFolder(sf.id, sf.name)}
+                            className="w-full text-left p-3 bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-800/80 hover:bg-indigo-100/70 dark:hover:bg-indigo-900/50 rounded-xl transition-all flex items-center justify-between cursor-pointer shadow-3xs"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <FolderOpen className="h-4.5 w-4.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                              <div className="min-w-0">
+                                <span className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate block">{sf.name}</span>
+                                <span className="text-[10px] text-slate-500 dark:text-slate-400 block truncate">
+                                  {sf.ownerEmail ? `By ${sf.ownerEmail}` : "Co-Host Album"}
+                                </span>
+                              </div>
+                            </div>
+                            <ChevronRight className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Personal Drive Folders */}
+                    {sharedFolders.length > 0 && (
+                      <div className="px-2 pt-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">
+                        Your Drive Folders
+                      </div>
+                    )}
+
                     {folders.map((fld) => {
-                      if (fld.name === "App Uploads Gallery") {
-                        return null; // hide App Uploads default folder
-                      }
+                      if (fld.name === "App Uploads Gallery") return null;
+                      if (sharedFolders.some(sf => sf.id === fld.id)) return null;
                       return (
                         <button
                           key={fld.id}
@@ -3739,11 +3948,11 @@ export default function App() {
                           </p>
                         </div>
 
-                        {(isMyUpload || canModerate) && (
+                        {(isMyUpload || (canModerate && canDeletePhotos)) && (
                           <button
                             onClick={() => handleTrashPhoto(photo.id, photo.name)}
                             className="p-1.5 bg-white/10 hover:bg-red-500 hover:text-white rounded-lg transition-colors text-white text-xs mt-auto shrink-0 cursor-pointer"
-                            title={canModerate ? "Delete this photo (Host Moderation)" : "Trash/Delete my accidental drop"}
+                            title={canModerate && canDeletePhotos ? "Delete this photo (Host Moderation)" : "Trash/Delete my accidental drop"}
                             id={`trash_button_${photo.id}`}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
@@ -4047,16 +4256,16 @@ export default function App() {
                 </div>
 
                 {/* Delete button (owner, co-host, or uploader) */}
-                {(myUploads.includes(selectedPhoto.id) || canModerate) && (
+                {(myUploads.includes(selectedPhoto.id) || (canModerate && canDeletePhotos)) && (
                   <button
                     onClick={() => handleTrashPhoto(selectedPhoto.id, selectedPhoto.name)}
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-red-600/85 hover:bg-red-600 text-white font-semibold text-xs rounded-full transition-all active:scale-95 cursor-pointer shadow-sm"
                     id="lightbox_trash_button"
-                    title={canModerate ? "Delete Photo (Host Moderation)" : "Delete Photo"}
+                    title={canModerate && canDeletePhotos ? "Delete Photo (Host Moderation)" : "Delete Photo"}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                     <span className="hidden sm:inline">
-                      {canModerate && !myUploads.includes(selectedPhoto.id) ? "Delete" : "Delete mine"}
+                      {canModerate && canDeletePhotos && !myUploads.includes(selectedPhoto.id) ? "Delete" : "Delete mine"}
                     </span>
                   </button>
                 )}
@@ -4157,20 +4366,20 @@ export default function App() {
             {/* Actions list */}
             <div className="flex items-center gap-2 w-full md:w-auto justify-end">
               {/* Trash option for photos inside selection */}
-              {(canModerate ? selectedPhotoIds.length > 0 : selectedPhotoIds.some(id => myUploads.includes(id))) && (
+              {((canModerate && canDeletePhotos) ? selectedPhotoIds.length > 0 : selectedPhotoIds.some(id => myUploads.includes(id))) && (
                 <button
                   onClick={() => {
-                    const delets = canModerate
+                    const delets = (canModerate && canDeletePhotos)
                       ? selectedPhotoIds
                       : selectedPhotoIds.filter(id => myUploads.includes(id));
                     handleTrashMultiplePhotos(delets);
                   }}
                   className="px-3.5 py-2.5 bg-red-50 hover:bg-red-100 text-red-600 font-bold text-xs rounded-2xl transition-all cursor-pointer flex items-center gap-1.5 shadow-3xs"
-                  title={canModerate ? "Delete selected photos from Drive (Host Moderation)" : "Trash selected photos uploaded by me"}
+                  title={(canModerate && canDeletePhotos) ? "Delete selected photos from Drive (Host Moderation)" : "Trash selected photos uploaded by me"}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   <span className="hidden sm:inline">
-                    {canModerate
+                    {(canModerate && canDeletePhotos)
                       ? `Delete Selected (${selectedPhotoIds.length})`
                       : `Delete Ours (${selectedPhotoIds.filter(id => myUploads.includes(id)).length})`
                     }
@@ -4320,45 +4529,101 @@ export default function App() {
               </div>
 
               {/* Invite by Email Input Form */}
-              <form onSubmit={handleInviteCoHost} className="space-y-2">
-                <label htmlFor="cohost_email_input" className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                  Invite via Google Email
-                </label>
-                <div className="flex gap-2">
-                  <div className="relative flex-1">
-                    <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                    <input
-                      id="cohost_email_input"
-                      type="email"
-                      value={coHostEmailInput}
-                      onChange={(e) => setCoHostEmailInput(e.target.value)}
-                      placeholder="friend@gmail.com"
-                      disabled={invitingCoHost}
-                      className="w-full pl-9 pr-3 py-2.5 bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
-                    />
+              {canManageCohosts ? (
+                <form onSubmit={handleInviteCoHost} className="space-y-3">
+                  <label htmlFor="cohost_email_input" className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Invite via Google Email
+                  </label>
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                      <input
+                        id="cohost_email_input"
+                        type="email"
+                        value={coHostEmailInput}
+                        onChange={(e) => setCoHostEmailInput(e.target.value)}
+                        placeholder="friend@gmail.com"
+                        disabled={invitingCoHost}
+                        className="w-full pl-9 pr-3 py-2.5 bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={invitingCoHost || !coHostEmailInput.trim()}
+                      className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-extrabold rounded-xl transition-all cursor-pointer shadow-xs active:scale-98 shrink-0 flex items-center gap-1.5"
+                    >
+                      {invitingCoHost ? (
+                        <>
+                          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                          <span>Inviting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <UserPlus className="h-3.5 w-3.5" />
+                          <span>Invite</span>
+                        </>
+                      )}
+                    </button>
                   </div>
-                  <button
-                    type="submit"
-                    disabled={invitingCoHost || !coHostEmailInput.trim()}
-                    className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-extrabold rounded-xl transition-all cursor-pointer shadow-xs active:scale-98 shrink-0 flex items-center gap-1.5"
-                  >
-                    {invitingCoHost ? (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                        <span>Inviting...</span>
-                      </>
-                    ) : (
-                      <>
-                        <UserPlus className="h-3.5 w-3.5" />
-                        <span>Invite</span>
-                      </>
-                    )}
-                  </button>
+
+                  {/* Granular Permissions Checkboxes */}
+                  <div className="space-y-1.5 pt-1">
+                    <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider font-mono">
+                      Co-Host Permissions to Grant:
+                    </span>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <label className="flex items-center gap-2 p-2 bg-slate-50/80 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={invitePermissions.canDeletePhotos}
+                          onChange={(e) => setInvitePermissions(p => ({ ...p, canDeletePhotos: e.target.checked }))}
+                          className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
+                        />
+                        <span className="font-semibold text-slate-700 dark:text-slate-300 text-[11px]">Delete photos</span>
+                      </label>
+
+                      <label className="flex items-center gap-2 p-2 bg-slate-50/80 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={invitePermissions.canTogglePrivacy}
+                          onChange={(e) => setInvitePermissions(p => ({ ...p, canTogglePrivacy: e.target.checked }))}
+                          className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
+                        />
+                        <span className="font-semibold text-slate-700 dark:text-slate-300 text-[11px]">Toggle Private View</span>
+                      </label>
+
+                      <label className="flex items-center gap-2 p-2 bg-slate-50/80 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={invitePermissions.canManageCohosts}
+                          onChange={(e) => setInvitePermissions(p => ({ ...p, canManageCohosts: e.target.checked }))}
+                          className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
+                        />
+                        <span className="font-semibold text-slate-700 dark:text-slate-300 text-[11px]">Manage co-hosts</span>
+                      </label>
+
+                      <label className="flex items-center gap-2 p-2 bg-slate-50/80 dark:bg-slate-800/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={invitePermissions.canEditSettings}
+                          onChange={(e) => setInvitePermissions(p => ({ ...p, canEditSettings: e.target.checked }))}
+                          className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
+                        />
+                        <span className="font-semibold text-slate-700 dark:text-slate-300 text-[11px]">Album settings</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500 leading-relaxed">
+                    We grant their email Editor rights in Google Drive so they can sign in and open this shared folder with host view.
+                  </p>
+                </form>
+              ) : (
+                <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-2xl border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-200 flex items-center gap-2">
+                  <ShieldAlert className="h-4 w-4 shrink-0 text-amber-500" />
+                  <span>You have Co-Host access to this album. Permissions and co-host invitations are managed by the album owner.</span>
                 </div>
-                <p className="text-[11px] text-slate-400 dark:text-slate-500 leading-relaxed">
-                  We grant their email Editor rights in Google Drive so they can sign in and moderate this album.
-                </p>
-              </form>
+              )}
 
               {/* Quick Co-Host Invite Link */}
               <div className="p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 space-y-2">
@@ -4413,38 +4678,113 @@ export default function App() {
                     <p className="text-[11px] text-slate-400 dark:text-slate-500">Enter an email above to add your first co-host!</p>
                   </div>
                 ) : (
-                  <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1 divide-y divide-slate-100 dark:divide-slate-800/60">
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1 divide-y divide-slate-100 dark:divide-slate-800/60">
                     {coHosts.map((cohost) => (
-                      <div key={cohost.email} className="flex items-center justify-between py-2 text-xs">
-                        <div className="min-w-0 pr-2">
-                          <p className="font-bold text-slate-800 dark:text-slate-200 truncate">{cohost.email}</p>
-                          <p className="text-[10px] text-slate-400 font-mono">
-                            {cohost.permissionId ? "✓ Drive Editor Access" : "Invited Co-Host"} • {new Date(cohost.addedAt).toLocaleDateString()}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          disabled={removingCoHostEmail === cohost.email}
-                          onClick={() => {
-                            setConfirmDialog({
-                              isOpen: true,
-                              title: "Remove Co-Host",
-                              message: `Are you sure you want to remove ${cohost.email} as a co-host? They will lose album moderation access.`,
-                              confirmText: "Remove Co-Host",
-                              cancelText: "Cancel",
-                              isDestructive: true,
-                              onConfirm: () => handleRemoveCoHost(cohost.email),
-                            });
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition-colors cursor-pointer shrink-0"
-                          title={`Remove ${cohost.email}`}
-                        >
-                          {removingCoHostEmail === cohost.email ? (
-                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-3.5 w-3.5" />
+                      <div key={cohost.email} className="pt-2 text-xs space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <div className="min-w-0 pr-2">
+                            <p className="font-bold text-slate-800 dark:text-slate-200 truncate">{cohost.email}</p>
+                            <p className="text-[10px] text-slate-400 font-mono">
+                              {cohost.permissionId ? "✓ Drive Editor Access" : "Invited Co-Host"} • {new Date(cohost.addedAt).toLocaleDateString()}
+                            </p>
+                          </div>
+                          {canManageCohosts && (
+                            <button
+                              type="button"
+                              disabled={removingCoHostEmail === cohost.email}
+                              onClick={() => {
+                                setConfirmDialog({
+                                  isOpen: true,
+                                  title: "Remove Co-Host",
+                                  message: `Are you sure you want to remove ${cohost.email} as a co-host? They will lose album moderation access.`,
+                                  confirmText: "Remove Co-Host",
+                                  cancelText: "Cancel",
+                                  isDestructive: true,
+                                  onConfirm: () => handleRemoveCoHost(cohost.email),
+                                });
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition-colors cursor-pointer shrink-0"
+                              title={`Remove ${cohost.email}`}
+                            >
+                              {removingCoHostEmail === cohost.email ? (
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5" />
+                              )}
+                            </button>
                           )}
-                        </button>
+                        </div>
+
+                        {/* Granular Permission Badges / Interactive Toggles */}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {/* Delete Photos */}
+                          <button
+                            type="button"
+                            disabled={!isOwner || updatingPermsEmail === cohost.email}
+                            onClick={() => isOwner && handleUpdateCoHostPermissions(cohost.email, { canDeletePhotos: cohost.permissions?.canDeletePhotos === false })}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border flex items-center gap-1 transition-all ${
+                              cohost.permissions?.canDeletePhotos !== false
+                                ? "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300"
+                                : "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400 line-through opacity-60"
+                            } ${isOwner ? "cursor-pointer hover:scale-102" : "cursor-default"}`}
+                            title={isOwner ? "Click to toggle delete permission" : "Delete photos permission"}
+                          >
+                            <Trash2 className="h-2.5 w-2.5" />
+                            <span>Delete Photos</span>
+                          </button>
+
+                          {/* Toggle Privacy */}
+                          <button
+                            type="button"
+                            disabled={!isOwner || updatingPermsEmail === cohost.email}
+                            onClick={() => isOwner && handleUpdateCoHostPermissions(cohost.email, { canTogglePrivacy: !cohost.permissions?.canTogglePrivacy })}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border flex items-center gap-1 transition-all ${
+                              cohost.permissions?.canTogglePrivacy
+                                ? "bg-amber-50 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300"
+                                : "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400 line-through opacity-60"
+                            } ${isOwner ? "cursor-pointer hover:scale-102" : "cursor-default"}`}
+                            title={isOwner ? "Click to toggle private mode control" : "Toggle private mode permission"}
+                          >
+                            <Lock className="h-2.5 w-2.5" />
+                            <span>Private View</span>
+                          </button>
+
+                          {/* Manage Cohosts */}
+                          <button
+                            type="button"
+                            disabled={!isOwner || updatingPermsEmail === cohost.email}
+                            onClick={() => isOwner && handleUpdateCoHostPermissions(cohost.email, { canManageCohosts: !cohost.permissions?.canManageCohosts })}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border flex items-center gap-1 transition-all ${
+                              cohost.permissions?.canManageCohosts
+                                ? "bg-indigo-50 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300"
+                                : "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400 line-through opacity-60"
+                            } ${isOwner ? "cursor-pointer hover:scale-102" : "cursor-default"}`}
+                            title={isOwner ? "Click to toggle manage cohosts permission" : "Manage cohosts permission"}
+                          >
+                            <Users className="h-2.5 w-2.5" />
+                            <span>Invite Others</span>
+                          </button>
+
+                          {/* Settings */}
+                          <button
+                            type="button"
+                            disabled={!isOwner || updatingPermsEmail === cohost.email}
+                            onClick={() => isOwner && handleUpdateCoHostPermissions(cohost.email, { canEditSettings: !cohost.permissions?.canEditSettings })}
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border flex items-center gap-1 transition-all ${
+                              cohost.permissions?.canEditSettings
+                                ? "bg-purple-50 dark:bg-purple-950/40 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-300"
+                                : "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400 line-through opacity-60"
+                            } ${isOwner ? "cursor-pointer hover:scale-102" : "cursor-default"}`}
+                            title={isOwner ? "Click to toggle settings permission" : "Settings permission"}
+                          >
+                            <SlidersHorizontal className="h-2.5 w-2.5" />
+                            <span>Settings</span>
+                          </button>
+
+                          {updatingPermsEmail === cohost.email && (
+                            <RefreshCw className="h-2.5 w-2.5 animate-spin text-indigo-500 ml-1" />
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -4455,10 +4795,10 @@ export default function App() {
               <div className="p-3 bg-indigo-50/60 dark:bg-indigo-950/40 rounded-2xl border border-indigo-100 dark:border-indigo-900 text-[11px] text-indigo-700 dark:text-indigo-300 space-y-1">
                 <p className="font-bold flex items-center gap-1.5">
                   <Sparkles className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
-                  What can Co-Hosts do?
+                  How do Co-Hosts work?
                 </p>
                 <p className="leading-relaxed opacity-90 pl-5 text-[10.5px]">
-                  When co-hosts visit the app and connect with their Google account, they will automatically gain moderation powers to delete inappropriate drops, manage photos, and bypass private mode.
+                  When invited co-hosts sign in with their Gmail, they get the full Owner View for this album with only the permissions you grant. For instance, you can prevent them from turning Private Guest View on or off. Co-hosts can also scan the QR code to experience the guest upload view.
                 </p>
               </div>
 
