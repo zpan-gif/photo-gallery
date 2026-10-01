@@ -1229,9 +1229,8 @@ app.post("/api/delete/:fileId", async (req, res) => {
     );
 
     const isCoHost = Boolean(
-      folderCreds?.coHostKey &&
-      reqCoHostKey &&
-      reqCoHostKey.trim() === folderCreds.coHostKey.trim()
+      (folderCreds?.coHostKey && reqCoHostKey && reqCoHostKey.trim() === folderCreds.coHostKey.trim()) ||
+      (userCreds?.ownerEmail && folderCreds?.coHosts?.some(c => c.email.toLowerCase() === userCreds.ownerEmail!.toLowerCase()))
     );
 
     if (!isOwner && !isCoHost) {
@@ -1251,7 +1250,7 @@ app.post("/api/delete/:fileId", async (req, res) => {
       },
     });
 
-    res.json({ success: true, message: "Photo successfully sent to owner's drive trash bin." });
+    res.json({ success: true, message: "Photo successfully sent to trash bin." });
   } catch (err: any) {
     console.error("Photo trashing failed:", err);
     res.status(500).json({ error: err.message || "Owner trashing execution failure." });
@@ -1437,19 +1436,40 @@ app.get("/api/cohosts", async (req, res) => {
   }
 });
 
-// 15. Invite Co-Host (Owner only: sets Google Drive permission + saves to coHosts)
+// 15. Invite Co-Host (Owner or authorized co-host: sets Google Drive permission + saves to coHosts)
 app.post("/api/cohosts", async (req, res) => {
   const sessionId = (req as any).sessionId;
-  const { email, folderId: reqFolderId } = req.body;
+  const { email, folderId: reqFolderId, key: reqKey, origin: reqOrigin } = req.body;
+  const reqCoHostKey = (reqKey || req.headers["x-cohost-key"]) as string | undefined;
   try {
     const creds = await getSavedCredentials(sessionId);
-    if (!creds || !creds.refreshToken) {
-      return res.status(401).json({ error: "Only the album owner can invite co-hosts." });
-    }
-
-    const folderId = reqFolderId || creds.folderId;
+    const folderId = reqFolderId || creds?.folderId;
     if (!folderId) {
       return res.status(400).json({ error: "No active Google Drive folder selected." });
+    }
+
+    let folderCreds = await getSavedCredentialsForFolder(folderId);
+    if (!folderCreds && creds) {
+      folderCreds = creds;
+    }
+
+    if (!folderCreds || !folderCreds.refreshToken) {
+      return res.status(401).json({ error: "Google Drive is not connected for this album." });
+    }
+
+    const isOwner = Boolean(
+      creds?.refreshToken &&
+      ((folderCreds.ownerEmail && creds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === creds.ownerEmail.toLowerCase()) ||
+       (!reqFolderId && creds.folderId === folderId))
+    );
+
+    const isCoHost = Boolean(
+      (folderCreds.coHostKey && reqCoHostKey && reqCoHostKey.trim() === folderCreds.coHostKey.trim()) ||
+      (creds?.ownerEmail && folderCreds.coHosts?.some(c => c.email.toLowerCase() === creds.ownerEmail!.toLowerCase()))
+    );
+
+    if (!isOwner && !isCoHost) {
+      return res.status(401).json({ error: "Only the album owner or an authorized co-host can invite co-hosts." });
     }
 
     const cleanEmail = (email || "").toString().trim().toLowerCase();
@@ -1457,17 +1477,35 @@ app.post("/api/cohosts", async (req, res) => {
       return res.status(400).json({ error: "Please provide a valid email address." });
     }
 
-    if (creds.ownerEmail && cleanEmail === creds.ownerEmail.toLowerCase()) {
-      return res.status(400).json({ error: "You are already the owner of this album." });
+    if (folderCreds.ownerEmail && cleanEmail === folderCreds.ownerEmail.toLowerCase()) {
+      return res.status(400).json({ error: "This email is already the owner of this album." });
     }
 
-    const currentCoHosts: CoHostInfo[] = creds.coHosts || [];
+    const currentCoHosts: CoHostInfo[] = folderCreds.coHosts || [];
     if (currentCoHosts.some(c => c.email.toLowerCase() === cleanEmail)) {
       return res.status(400).json({ error: `${cleanEmail} is already invited as a co-host.` });
     }
 
-    // Call Google Drive API to grant writer (Editor) permissions
-    const drive = getAuthorizedDriveClient(creds);
+    // Ensure target folder has a stable coHostKey
+    if (!folderCreds.coHostKey) {
+      folderCreds.coHostKey = crypto.randomBytes(16).toString("hex");
+      if (creds && isOwner) creds.coHostKey = folderCreds.coHostKey;
+      await updateFolderCredentials(folderId, { coHostKey: folderCreds.coHostKey });
+    }
+
+    // Build the direct web app URL that opens the Owner View for the co-host
+    const clientOrigin = (
+      reqOrigin ||
+      req.headers.origin ||
+      (req.headers.referer ? new URL(req.headers.referer).origin : null) ||
+      process.env.APP_URL ||
+      "http://localhost:3000"
+    ).toString().replace(/\/$/, "");
+
+    const coHostAppUrl = `${clientOrigin}/?folder=${folderId}&role=cohost&key=${encodeURIComponent(folderCreds.coHostKey)}`;
+
+    // Call Google Drive API to grant writer (Editor) permissions and include the Web App link in emailMessage
+    const drive = getAuthorizedDriveClient(folderCreds);
     let permissionId: string | undefined = undefined;
     let driveShared = false;
 
@@ -1475,6 +1513,7 @@ app.post("/api/cohosts", async (req, res) => {
       const permRes = await drive.permissions.create({
         fileId: folderId,
         sendNotificationEmail: true,
+        emailMessage: `You've been invited as an Album Co-Host with full Host & Moderation controls!\n\nOpen your album in our web app here:\n${coHostAppUrl}\n\n(Click the link above to access the Host View. You also have Editor access in Google Drive.)`,
         requestBody: {
           role: "writer",
           type: "user",
@@ -1496,17 +1535,22 @@ app.post("/api/cohosts", async (req, res) => {
     };
 
     const updatedCoHosts = [...currentCoHosts, newCoHost];
-    creds.coHosts = updatedCoHosts;
-    await saveCredentials(sessionId, creds);
+    folderCreds.coHosts = updatedCoHosts;
+    if (creds && isOwner) {
+      creds.coHosts = updatedCoHosts;
+      await saveCredentials(sessionId, creds);
+    }
     await updateFolderCredentials(folderId, { coHosts: updatedCoHosts });
 
     res.json({
       success: true,
       coHosts: updatedCoHosts,
+      coHostUrl: coHostAppUrl,
+      coHostKey: folderCreds.coHostKey,
       driveShared,
       message: driveShared
-        ? `Co-host invited! Google Drive sent an invite to ${cleanEmail}.`
-        : `Co-host added! ${cleanEmail} can now moderate when signed in.`
+        ? `Co-host invited! We sent an invite with your web app link to ${cleanEmail}.`
+        : `Co-host added! ${cleanEmail} can now moderate in the app.`
     });
   } catch (err: any) {
     console.error("Error inviting co-host:", err);
@@ -1514,28 +1558,49 @@ app.post("/api/cohosts", async (req, res) => {
   }
 });
 
-// 16. Remove Co-Host (Owner only)
+// 16. Remove Co-Host (Owner or authorized co-host)
 app.delete("/api/cohosts", async (req, res) => {
   const sessionId = (req as any).sessionId;
-  const { email, folderId: reqFolderId } = req.body;
+  const { email, folderId: reqFolderId, key: reqKey } = req.body;
+  const reqCoHostKey = (reqKey || req.headers["x-cohost-key"]) as string | undefined;
   try {
     const creds = await getSavedCredentials(sessionId);
-    if (!creds || !creds.refreshToken) {
-      return res.status(401).json({ error: "Only the album owner can remove co-hosts." });
-    }
-
-    const folderId = reqFolderId || creds.folderId;
+    const folderId = reqFolderId || creds?.folderId;
     if (!folderId) {
       return res.status(400).json({ error: "No active Google Drive folder selected." });
     }
 
+    let folderCreds = await getSavedCredentialsForFolder(folderId);
+    if (!folderCreds && creds) {
+      folderCreds = creds;
+    }
+
+    if (!folderCreds || !folderCreds.refreshToken) {
+      return res.status(401).json({ error: "Google Drive is not connected." });
+    }
+
+    const isOwner = Boolean(
+      creds?.refreshToken &&
+      ((folderCreds.ownerEmail && creds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === creds.ownerEmail.toLowerCase()) ||
+       (!reqFolderId && creds.folderId === folderId))
+    );
+
+    const isCoHost = Boolean(
+      (folderCreds.coHostKey && reqCoHostKey && reqCoHostKey.trim() === folderCreds.coHostKey.trim()) ||
+      (creds?.ownerEmail && folderCreds.coHosts?.some(c => c.email.toLowerCase() === creds.ownerEmail!.toLowerCase()))
+    );
+
+    if (!isOwner && !isCoHost) {
+      return res.status(401).json({ error: "Only the album owner or an authorized co-host can remove co-hosts." });
+    }
+
     const cleanEmail = (email || "").toString().trim().toLowerCase();
-    const currentCoHosts: CoHostInfo[] = creds.coHosts || [];
+    const currentCoHosts: CoHostInfo[] = folderCreds.coHosts || [];
     const target = currentCoHosts.find(c => c.email.toLowerCase() === cleanEmail);
 
     if (target && target.permissionId) {
       try {
-        const drive = getAuthorizedDriveClient(creds);
+        const drive = getAuthorizedDriveClient(folderCreds);
         await drive.permissions.delete({
           fileId: folderId,
           permissionId: target.permissionId,
@@ -1546,8 +1611,11 @@ app.delete("/api/cohosts", async (req, res) => {
     }
 
     const updatedCoHosts = currentCoHosts.filter(c => c.email.toLowerCase() !== cleanEmail);
-    creds.coHosts = updatedCoHosts;
-    await saveCredentials(sessionId, creds);
+    folderCreds.coHosts = updatedCoHosts;
+    if (creds && isOwner) {
+      creds.coHosts = updatedCoHosts;
+      await saveCredentials(sessionId, creds);
+    }
     await updateFolderCredentials(folderId, { coHosts: updatedCoHosts });
 
     res.json({

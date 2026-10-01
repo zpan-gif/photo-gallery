@@ -337,6 +337,9 @@ export default function App() {
   const [invitingCoHost, setInvitingCoHost] = useState(false);
   const [removingCoHostEmail, setRemovingCoHostEmail] = useState<string | null>(null);
   const [copiedCoHostLink, setCopiedCoHostLink] = useState(false);
+  const [shareCardTab, setShareCardTab] = useState<"guest" | "cohost">("guest");
+  const [lastInvitedCoHost, setLastInvitedCoHost] = useState<{ email: string; appUrl: string } | null>(null);
+  const [copiedCoHostEmailLink, setCopiedCoHostEmailLink] = useState<string | null>(null);
 
   // Administrative Setup states
   const [showAdminGuide, setShowAdminGuide] = useState(false);
@@ -653,6 +656,47 @@ export default function App() {
       });
   };
 
+  const getCoHostMailtoUrl = (folderId: string, recipientEmail?: string) => {
+    const link = getCoHostInviteUrl(folderId);
+    const folderName = status?.folderName || guestFolderName || "our photo album";
+    const subject = encodeURIComponent(`Co-Host Invitation: ${folderName}`);
+    const body = encodeURIComponent(
+      `Hi!\n\nYou've been invited as a Co-Host for "${folderName}" with full Owner & Moderation access!\n\nOpen our web app here with host controls:\n${link}\n\n(No Google Drive setup needed — clicking this link directly opens the Host View in the app.)\n\nEnjoy!`
+    );
+    return `mailto:${recipientEmail ? encodeURIComponent(recipientEmail) : ""}?subject=${subject}&body=${body}`;
+  };
+
+  const handleShareCoHostLink = async (folderId: string) => {
+    const link = getCoHostInviteUrl(folderId);
+    const folderName = status?.folderName || guestFolderName || "our photo album";
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `Co-Host Access: ${folderName}`,
+          text: `You've been invited as a Co-Host for "${folderName}" with full Owner controls! Open the album here:`,
+          url: link,
+        });
+        return;
+      } catch (e) {
+        // User cancelled or unsupported
+      }
+    }
+    handleCopyCoHostLink(folderId);
+  };
+
+  const handleCopySpecificCoHostLink = (folderId: string, email: string) => {
+    const link = getCoHostInviteUrl(folderId);
+    navigator.clipboard.writeText(link)
+      .then(() => {
+        setCopiedCoHostEmailLink(email);
+        setTimeout(() => setCopiedCoHostEmailLink(null), 2000);
+        setSuccessMsg(`Co-Host web app link for ${email} copied!`);
+      })
+      .catch(() => {
+        setErrorMsg("Failed to copy link.");
+      });
+  };
+
   const fetchCoHosts = async () => {
     const activeFolder = guestFolderId || status?.folderId;
     if (!activeFolder) return;
@@ -692,13 +736,27 @@ export default function App() {
           "Content-Type": "application/json",
           ...(activeKey ? { "x-cohost-key": activeKey } : {})
         },
-        body: JSON.stringify({ email, folderId: activeFolder, key: activeKey }),
+        body: JSON.stringify({
+          email,
+          folderId: activeFolder,
+          key: activeKey,
+          origin: window.location.origin
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || "Failed to invite co-host.");
       }
       setCoHosts(data.coHosts || []);
+      if (data.coHostKey) {
+        setCoHostKey(data.coHostKey);
+        if (activeFolder) {
+          try { localStorage.setItem(`cohost_key_${activeFolder}`, data.coHostKey); } catch {}
+        }
+        setStatus(prev => prev ? { ...prev, coHostKey: data.coHostKey } : null);
+      }
+      const coHostLink = data.coHostUrl || (activeFolder ? getCoHostInviteUrl(activeFolder) : "");
+      setLastInvitedCoHost({ email, appUrl: coHostLink });
       setCoHostEmailInput("");
       setSuccessMsg(data.message || `Successfully invited ${email} as co-host!`);
     } catch (err: any) {
@@ -726,6 +784,9 @@ export default function App() {
         throw new Error(data.error || "Failed to remove co-host.");
       }
       setCoHosts(data.coHosts || []);
+      if (lastInvitedCoHost?.email === email) {
+        setLastInvitedCoHost(null);
+      }
       setSuccessMsg(data.message || `Removed ${email} from co-hosts.`);
     } catch (err: any) {
       setErrorMsg(err.message || "Failed to remove co-host.");
@@ -1707,7 +1768,15 @@ export default function App() {
           setBatchActionProgress(Math.round(10 + (i / total) * 80));
           try {
             const activeFolderId = guestFolderId || status?.folderId;
-            const res = await fetch(`/api/delete/${id}${activeFolderId ? `?folderId=${activeFolderId}` : ""}`, { method: "POST" });
+            const activeKey = status?.coHostKey || coHostKey || (activeFolderId ? localStorage.getItem(`cohost_key_${activeFolderId}`) : null);
+            const delParams = new URLSearchParams();
+            if (activeFolderId) delParams.set("folderId", activeFolderId);
+            if (activeKey) delParams.set("key", activeKey);
+            const delQuery = delParams.toString() ? `?${delParams.toString()}` : "";
+            const res = await fetch(`/api/delete/${id}${delQuery}`, {
+              method: "POST",
+              headers: { ...(activeKey ? { "x-cohost-key": activeKey } : {}) }
+            });
             if (res.ok) {
               deletedCount++;
             }
@@ -1764,7 +1833,15 @@ export default function App() {
 
         try {
           const activeFolderId = guestFolderId || status?.folderId;
-          const res = await fetch(`/api/delete/${photoId}${activeFolderId ? `?folderId=${activeFolderId}` : ""}`, { method: "POST" });
+          const activeKey = status?.coHostKey || coHostKey || (activeFolderId ? localStorage.getItem(`cohost_key_${activeFolderId}`) : null);
+          const delParams = new URLSearchParams();
+          if (activeFolderId) delParams.set("folderId", activeFolderId);
+          if (activeKey) delParams.set("key", activeKey);
+          const delQuery = delParams.toString() ? `?${delParams.toString()}` : "";
+          const res = await fetch(`/api/delete/${photoId}${delQuery}`, {
+            method: "POST",
+            headers: { ...(activeKey ? { "x-cohost-key": activeKey } : {}) }
+          });
           const data = await res.json();
 
           if (!res.ok) {
@@ -3191,83 +3268,202 @@ export default function App() {
                 📁 Connected Folder &bull; <strong>{photos.length}</strong> {photos.length === 1 ? "photo" : "photos"}
               </p>
 
-              {/* Simplified Share Card */}
+              {/* Simplified Share Card with Guest & Co-Host Tabs */}
               {status.folderName !== "App Uploads Gallery" && (
                 <div
                   className="mt-6 overflow-hidden rounded-3xl border border-indigo-100 dark:border-indigo-950 bg-linear-to-br from-white via-indigo-50/15 to-purple-50/15 dark:from-slate-900 dark:via-indigo-950/5 dark:to-purple-950/5 p-6 shadow-sm max-w-md mx-auto text-center space-y-5"
                   id="owner_guest_share_card"
                 >
-                  <div className="flex flex-col items-center gap-4">
-                    {/* Centered Big QR Code */}
-                    <div id="owner_guest_share_qr" className="bg-white p-4.5 rounded-2xl border border-slate-200/60 flex items-center justify-center shadow-md relative group">
-                      <QRCodeSVG
-                        value={getPublicGuestUrl(status.folderId!)}
-                        size={140}
-                        level="H"
-                        includeMargin={false}
-                        fgColor="#1e1b4b" // Deep beautiful Indigo
-                      />
-                      <div className="absolute inset-0 m-auto h-8 w-8 rounded-full bg-indigo-55 border-2 border-indigo-200 flex items-center justify-center opacity-90 shadow-4xs">
-                        <ImageIcon className="h-4.5 w-4.5 text-indigo-650" />
-                      </div>
-                    </div>
-
-                    <div className="space-y-1">
-                      <h4 className="text-base font-extrabold text-slate-900 dark:text-slate-100 tracking-tight">
-                        Share this with your friends! 📸✨
-                      </h4>
-                      <p className="text-xs text-slate-500 dark:text-slate-400 leading-normal max-w-xs mx-auto">
-                        Anyone can scan this code or use the link to upload photos instantly — no account needed.
-                      </p>
-                    </div>
-
-                    {/* Clean Action Buttons */}
-                    <div className="flex gap-3 w-full pt-2">
-                      <button
-                        onClick={() => handleCopyShareLink(status.folderId!)}
-                        className="flex-1 bg-indigo-600 hover:bg-indigo-750 text-white font-extrabold text-xs py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98"
-                      >
-                        {copiedShareLink ? (
-                          <>
-                            <Check className="h-4 w-4" />
-                            <span>Copied!</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="h-4 w-4 shrink-0" />
-                            <span>Copy Link</span>
-                          </>
-                        )}
-                      </button>
-
-                      <button
-                        onClick={handleDownloadQR}
-                        className="flex-1 bg-slate-900 dark:bg-slate-105 hover:bg-slate-850 dark:hover:bg-white/90 text-white dark:text-slate-900 font-extrabold text-xs py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98"
-                      >
-                        <Download className="h-4 w-4 shrink-0" />
-                        <span>Download QR</span>
-                      </button>
-                    </div>
-
-                    {/* Co-Host Action Button */}
+                  {/* Share Mode Selector: Guests vs Co-Host Owner Access */}
+                  <div className="inline-flex p-1 bg-slate-100 dark:bg-slate-800 rounded-full text-xs font-bold w-full max-w-xs justify-center mx-auto shadow-3xs">
                     <button
+                      type="button"
+                      onClick={() => setShareCardTab("guest")}
+                      className={`flex-1 py-1.5 px-3 rounded-full transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                        shareCardTab === "guest"
+                          ? "bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-3xs"
+                          : "text-slate-500 hover:text-slate-900 dark:hover:text-white"
+                      }`}
+                      id="share_card_tab_guest"
+                    >
+                      <Upload className="h-3.5 w-3.5" />
+                      <span>Guest Upload</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => {
-                        setShowCoHostsModal(true);
+                        setShareCardTab("cohost");
                         fetchCoHosts();
                       }}
-                      className="w-full mt-1 bg-indigo-50/80 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 font-bold text-xs py-2.5 px-4 rounded-xl border border-indigo-200/70 dark:border-indigo-800/70 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-3xs active:scale-98"
-                      id="share_card_cohosts_btn"
-                      title="Invite co-hosts by email to help moderate this album"
+                      className={`flex-1 py-1.5 px-3 rounded-full transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                        shareCardTab === "cohost"
+                          ? "bg-indigo-600 text-white shadow-3xs"
+                          : "text-indigo-600 dark:text-indigo-400 hover:text-indigo-700"
+                      }`}
+                      id="share_card_tab_cohost"
                     >
-                      <UserPlus className="h-4 w-4 shrink-0 text-indigo-600 dark:text-indigo-400" />
-                      <span>Invite Co-Hosts / Moderators</span>
-                      {coHosts.length > 0 && (
-                        <span className="bg-indigo-600 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-full leading-none">
-                          {coHosts.length}
-                        </span>
-                      )}
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                      <span>Co-Host Access</span>
                     </button>
                   </div>
+
+                  {shareCardTab === "guest" ? (
+                    <div className="flex flex-col items-center gap-4">
+                      {/* Centered Big QR Code for Guests */}
+                      <div id="owner_guest_share_qr" className="bg-white p-4.5 rounded-2xl border border-slate-200/60 flex items-center justify-center shadow-md relative group">
+                        <QRCodeSVG
+                          value={getPublicGuestUrl(status.folderId!)}
+                          size={140}
+                          level="H"
+                          includeMargin={false}
+                          fgColor="#1e1b4b"
+                        />
+                        <div className="absolute inset-0 m-auto h-8 w-8 rounded-full bg-indigo-55 border-2 border-indigo-200 flex items-center justify-center opacity-90 shadow-4xs">
+                          <ImageIcon className="h-4.5 w-4.5 text-indigo-650" />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <h4 className="text-base font-extrabold text-slate-900 dark:text-slate-100 tracking-tight">
+                          Share with your guests! 📸✨
+                        </h4>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 leading-normal max-w-xs mx-auto">
+                          Guests can scan this code or use the link to drop photos instantly — no app or Google login needed.
+                        </p>
+                      </div>
+
+                      {/* Clean Action Buttons */}
+                      <div className="flex gap-3 w-full pt-2">
+                        <button
+                          onClick={() => handleCopyShareLink(status.folderId!)}
+                          className="flex-1 bg-indigo-600 hover:bg-indigo-750 text-white font-extrabold text-xs py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98"
+                        >
+                          {copiedShareLink ? (
+                            <>
+                              <Check className="h-4 w-4" />
+                              <span>Copied!</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="h-4 w-4 shrink-0" />
+                              <span>Copy Guest Link</span>
+                            </>
+                          )}
+                        </button>
+
+                        <button
+                          onClick={handleDownloadQR}
+                          className="flex-1 bg-slate-900 dark:bg-slate-105 hover:bg-slate-850 dark:hover:bg-white/90 text-white dark:text-slate-900 font-extrabold text-xs py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98"
+                        >
+                          <Download className="h-4 w-4 shrink-0" />
+                          <span>Download QR</span>
+                        </button>
+                      </div>
+
+                      {/* Co-Host Mode Quick Switch */}
+                      <button
+                        onClick={() => {
+                          setShareCardTab("cohost");
+                          fetchCoHosts();
+                        }}
+                        className="w-full mt-1 bg-indigo-50/80 dark:bg-indigo-950/40 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 font-bold text-xs py-2.5 px-4 rounded-xl border border-indigo-200/70 dark:border-indigo-800/70 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-3xs active:scale-98"
+                        id="share_card_switch_to_cohosts_btn"
+                      >
+                        <ShieldCheck className="h-4 w-4 shrink-0 text-indigo-600 dark:text-indigo-400" />
+                        <span>Need a Co-Host? Share Owner View</span>
+                        {coHosts.length > 0 && (
+                          <span className="bg-indigo-600 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-full leading-none">
+                            {coHosts.length}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-4">
+                      {/* Centered Co-Host QR Code for Immediate Owner View Access */}
+                      <div id="owner_cohost_share_qr" className="bg-white p-4.5 rounded-2xl border-2 border-indigo-300 dark:border-indigo-700 flex items-center justify-center shadow-md relative group">
+                        <QRCodeSVG
+                          value={getCoHostInviteUrl(status.folderId!)}
+                          size={140}
+                          level="H"
+                          includeMargin={false}
+                          fgColor="#312e81"
+                        />
+                        <div className="absolute inset-0 m-auto h-8 w-8 rounded-full bg-indigo-600 border-2 border-white flex items-center justify-center opacity-95 shadow-md">
+                          <ShieldCheck className="h-4.5 w-4.5 text-white" />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 text-[10.5px] font-extrabold uppercase tracking-wider font-mono">
+                          <ShieldCheck className="h-3 w-3" />
+                          <span>Owner View Access</span>
+                        </div>
+                        <h4 className="text-base font-extrabold text-slate-900 dark:text-slate-100 tracking-tight">
+                          Share Host Controls with Co-Host 👑
+                        </h4>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 leading-normal max-w-xs mx-auto">
+                          Scan with another phone or send the link to give them immediate Owner View in our web app — no Drive login needed.
+                        </p>
+                      </div>
+
+                      {/* Clean Action Buttons for Co-Host */}
+                      <div className="flex gap-2.5 w-full pt-2">
+                        <button
+                          onClick={() => handleCopyCoHostLink(status.folderId!)}
+                          className="flex-1 bg-indigo-600 hover:bg-indigo-750 text-white font-extrabold text-xs py-3 px-3 rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98"
+                        >
+                          {copiedCoHostLink ? (
+                            <>
+                              <Check className="h-4 w-4" />
+                              <span>Copied!</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="h-4 w-4 shrink-0" />
+                              <span>Copy Co-Host Link</span>
+                            </>
+                          )}
+                        </button>
+
+                        <a
+                          href={getCoHostMailtoUrl(status.folderId!)}
+                          className="px-3.5 py-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-750 dark:text-slate-200 font-extrabold text-xs rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-3xs active:scale-98"
+                          title="Open an email with the Co-Host web app link pre-filled"
+                        >
+                          <Mail className="h-4 w-4" />
+                          <span className="hidden sm:inline">Email Link</span>
+                        </a>
+
+                        <button
+                          onClick={() => handleShareCoHostLink(status.folderId!)}
+                          className="px-3 py-3 bg-slate-900 dark:bg-slate-105 hover:bg-slate-850 dark:hover:bg-white/90 text-white dark:text-slate-900 font-extrabold text-xs rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer shadow-xs active:scale-98"
+                          title="Share co-host link via apps (AirDrop, Messages, WhatsApp)"
+                        >
+                          <Share2 className="h-4 w-4" />
+                        </button>
+                      </div>
+
+                      {/* Manage Co-Hosts Modal Launcher */}
+                      <button
+                        onClick={() => {
+                          setShowCoHostsModal(true);
+                          fetchCoHosts();
+                        }}
+                        className="w-full mt-1 bg-slate-50 dark:bg-slate-800/60 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-xs py-2 px-4 rounded-xl border border-slate-200 dark:border-slate-700 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-3xs active:scale-98"
+                        id="share_card_cohosts_btn"
+                        title="Manage invited co-hosts"
+                      >
+                        <UserPlus className="h-3.5 w-3.5 text-indigo-500" />
+                        <span>Manage / Invite by Google Email</span>
+                        {coHosts.length > 0 && (
+                          <span className="bg-indigo-600 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-full leading-none">
+                            {coHosts.length}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -4298,14 +4494,17 @@ export default function App() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="h-10 w-10 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-100 dark:border-indigo-900 flex items-center justify-center shrink-0 shadow-3xs">
-                    <UserPlus className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
+                    <ShieldCheck className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
                   </div>
                   <div>
-                    <h3 className="font-sans font-extrabold text-slate-900 dark:text-slate-100 text-base tracking-tight">
-                      Album Co-Hosts &amp; Moderators
+                    <h3 className="font-sans font-extrabold text-slate-900 dark:text-slate-100 text-base tracking-tight flex items-center gap-1.5">
+                      <span>Co-Host Access</span>
+                      <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300">
+                        Owner View
+                      </span>
                     </h3>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Share album moderation with trusted friends or organizers
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      Give co-hosts the exact same Host View in our web app: delete photos, view all drops, and manage settings.
                     </p>
                   </div>
                 </div>
@@ -4319,10 +4518,109 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Invite by Email Input Form */}
-              <form onSubmit={handleInviteCoHost} className="space-y-2">
+              {/* SECTION 1: Direct Web App Link for Co-Hosts (Instant Owner Access) */}
+              <div className="p-4 bg-indigo-50/70 dark:bg-indigo-950/40 rounded-2xl border border-indigo-200/80 dark:border-indigo-800/80 space-y-3" id="cohost_direct_app_link_card">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-indigo-950 dark:text-indigo-200 flex items-center gap-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                    Direct Web App Link (Recommended)
+                  </span>
+                  <span className="text-[10px] font-mono font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-100/80 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full">
+                    Instant Host Access
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-indigo-900/80 dark:text-indigo-300/80 leading-relaxed">
+                  Anyone who opens this link immediately receives full Owner &amp; Moderation access in this web app — no Google Drive setup or sign-in required!
+                </p>
+
+                <p className="text-[10.5px] text-slate-600 dark:text-slate-300 font-mono bg-white dark:bg-slate-900 px-3 py-2 rounded-xl border border-indigo-150 dark:border-slate-800 truncate select-all">
+                  {status?.folderId || guestFolderId ? getCoHostInviteUrl(status?.folderId || guestFolderId || "") : "Connect Drive to get link"}
+                </p>
+
+                <div className="flex items-center gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => handleCopyCoHostLink(status?.folderId || guestFolderId || "")}
+                    className="flex-1 py-2 px-3 bg-indigo-600 hover:bg-indigo-750 text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-xs active:scale-98"
+                  >
+                    {copiedCoHostLink ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-emerald-300" />
+                        <span>Link Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" />
+                        <span>Copy App Link</span>
+                      </>
+                    )}
+                  </button>
+
+                  <a
+                    href={getCoHostMailtoUrl(status?.folderId || guestFolderId || "")}
+                    className="py-2 px-3 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-3xs active:scale-98"
+                    title="Send via Email"
+                  >
+                    <Mail className="h-3.5 w-3.5 text-slate-500" />
+                    <span>Email Link</span>
+                  </a>
+
+                  <button
+                    type="button"
+                    onClick={() => handleShareCoHostLink(status?.folderId || guestFolderId || "")}
+                    className="p-2 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-xl transition-all cursor-pointer shadow-3xs active:scale-98"
+                    title="Share link via other apps"
+                  >
+                    <Share2 className="h-3.5 w-3.5 text-slate-500" />
+                  </button>
+                </div>
+              </div>
+
+              {/* POST-INVITE SUCCESS SHORTCUT CARD */}
+              {lastInvitedCoHost && (
+                <div className="p-3.5 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-2xl space-y-2 animate-fade-in" id="cohost_last_invited_banner">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-800 dark:text-emerald-200 flex items-center gap-1.5">
+                      <CheckCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                      Invite Sent to {lastInvitedCoHost.email}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setLastInvitedCoHost(null)}
+                      className="text-slate-400 hover:text-slate-600 p-0.5 cursor-pointer"
+                      title="Dismiss"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-emerald-700/90 dark:text-emerald-300/90 leading-relaxed">
+                    Google Drive emailed them with the Web App link at the top. You can also send them the direct link right now:
+                  </p>
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleCopyCoHostLink(status?.folderId || guestFolderId || "")}
+                      className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition-all flex items-center gap-1 cursor-pointer"
+                    >
+                      <Copy className="h-3 w-3" />
+                      <span>Copy Web App Link</span>
+                    </button>
+                    <a
+                      href={getCoHostMailtoUrl(status?.folderId || guestFolderId || "", lastInvitedCoHost.email)}
+                      className="py-1.5 px-3 bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-200 text-xs font-bold rounded-lg transition-all flex items-center gap-1 cursor-pointer"
+                    >
+                      <Mail className="h-3 w-3 text-emerald-600" />
+                      <span>Email Directly</span>
+                    </a>
+                  </div>
+                </div>
+              )}
+
+              {/* SECTION 2: Invite by Email Input Form */}
+              <form onSubmit={handleInviteCoHost} className="space-y-2 pt-1">
                 <label htmlFor="cohost_email_input" className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                  Invite via Google Email
+                  Or Invite via Google Email
                 </label>
                 <div className="flex gap-2">
                   <div className="relative flex-1">
@@ -4356,42 +4654,12 @@ export default function App() {
                   </button>
                 </div>
                 <p className="text-[11px] text-slate-400 dark:text-slate-500 leading-relaxed">
-                  We grant their email Editor rights in Google Drive so they can sign in and moderate this album.
+                  We grant them Google Drive Editor access and include the direct Web App link at the top of Google's email notification.
                 </p>
               </form>
 
-              {/* Quick Co-Host Invite Link */}
-              <div className="p-3.5 bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                    <ShieldCheck className="h-3.5 w-3.5 text-indigo-500" />
-                    Co-Host Direct Link
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => handleCopyCoHostLink(status?.folderId || guestFolderId || "")}
-                    className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer"
-                  >
-                    {copiedCoHostLink ? (
-                      <>
-                        <Check className="h-3 w-3 text-emerald-500" />
-                        <span className="text-emerald-600 dark:text-emerald-400">Copied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3 w-3" />
-                        <span>Copy Link</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-                <p className="text-[10.5px] text-slate-500 dark:text-slate-400 font-mono bg-white dark:bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-200/60 dark:border-slate-800 truncate select-all">
-                  {status?.folderId ? getCoHostInviteUrl(status.folderId) : "Connect Drive to get link"}
-                </p>
-              </div>
-
-              {/* Active Co-Hosts List */}
-              <div className="space-y-2 pt-1">
+              {/* SECTION 3: Active Co-Hosts List */}
+              <div className="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800">
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs font-bold text-slate-900 dark:text-slate-100 uppercase tracking-wider font-mono">
                     Invited Co-Hosts ({coHosts.length})
@@ -4407,44 +4675,77 @@ export default function App() {
                 </div>
 
                 {coHosts.length === 0 ? (
-                  <div className="py-6 text-center border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl space-y-1">
-                    <UserCheck className="h-6 w-6 text-slate-300 dark:text-slate-600 mx-auto" />
+                  <div className="py-5 text-center border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl space-y-1">
+                    <UserCheck className="h-5 w-5 text-slate-300 dark:text-slate-600 mx-auto" />
                     <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">No co-hosts added yet</p>
-                    <p className="text-[11px] text-slate-400 dark:text-slate-500">Enter an email above to add your first co-host!</p>
+                    <p className="text-[11px] text-slate-400 dark:text-slate-500">Copy the Direct Web App link above or enter an email to invite!</p>
                   </div>
                 ) : (
                   <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1 divide-y divide-slate-100 dark:divide-slate-800/60">
                     {coHosts.map((cohost) => (
-                      <div key={cohost.email} className="flex items-center justify-between py-2 text-xs">
-                        <div className="min-w-0 pr-2">
+                      <div key={cohost.email} className="flex items-center justify-between py-2 text-xs gap-2">
+                        <div className="min-w-0 pr-1 flex-1">
                           <p className="font-bold text-slate-800 dark:text-slate-200 truncate">{cohost.email}</p>
                           <p className="text-[10px] text-slate-400 font-mono">
                             {cohost.permissionId ? "✓ Drive Editor Access" : "Invited Co-Host"} • {new Date(cohost.addedAt).toLocaleDateString()}
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          disabled={removingCoHostEmail === cohost.email}
-                          onClick={() => {
-                            setConfirmDialog({
-                              isOpen: true,
-                              title: "Remove Co-Host",
-                              message: `Are you sure you want to remove ${cohost.email} as a co-host? They will lose album moderation access.`,
-                              confirmText: "Remove Co-Host",
-                              cancelText: "Cancel",
-                              isDestructive: true,
-                              onConfirm: () => handleRemoveCoHost(cohost.email),
-                            });
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition-colors cursor-pointer shrink-0"
-                          title={`Remove ${cohost.email}`}
-                        >
-                          {removingCoHostEmail === cohost.email ? (
-                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-3.5 w-3.5" />
-                          )}
-                        </button>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          {/* Copy App Link for this Co-Host */}
+                          <button
+                            type="button"
+                            onClick={() => handleCopySpecificCoHostLink(status?.folderId || guestFolderId || "", cohost.email)}
+                            className="px-2 py-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 rounded-lg transition-colors cursor-pointer flex items-center gap-1 border border-indigo-200/60 dark:border-indigo-800/60"
+                            title={`Copy Web App Link for ${cohost.email}`}
+                          >
+                            {copiedCoHostEmailLink === cohost.email ? (
+                              <>
+                                <Check className="h-3 w-3 text-emerald-500" />
+                                <span className="text-emerald-600 dark:text-emerald-400">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3 w-3" />
+                                <span>Copy Link</span>
+                              </>
+                            )}
+                          </button>
+
+                          {/* Email Web App Link to this Co-Host */}
+                          <a
+                            href={getCoHostMailtoUrl(status?.folderId || guestFolderId || "", cohost.email)}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 rounded-lg transition-colors cursor-pointer"
+                            title={`Email Web App Link to ${cohost.email}`}
+                          >
+                            <Mail className="h-3.5 w-3.5" />
+                          </a>
+
+                          {/* Remove Co-Host */}
+                          <button
+                            type="button"
+                            disabled={removingCoHostEmail === cohost.email}
+                            onClick={() => {
+                              setConfirmDialog({
+                                isOpen: true,
+                                title: "Remove Co-Host",
+                                message: `Are you sure you want to remove ${cohost.email} as a co-host? They will lose album moderation access.`,
+                                confirmText: "Remove Co-Host",
+                                cancelText: "Cancel",
+                                isDestructive: true,
+                                onConfirm: () => handleRemoveCoHost(cohost.email),
+                              });
+                            }}
+                            className="p-1.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition-colors cursor-pointer"
+                            title={`Remove ${cohost.email}`}
+                          >
+                            {removingCoHostEmail === cohost.email ? (
+                              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -4455,15 +4756,15 @@ export default function App() {
               <div className="p-3 bg-indigo-50/60 dark:bg-indigo-950/40 rounded-2xl border border-indigo-100 dark:border-indigo-900 text-[11px] text-indigo-700 dark:text-indigo-300 space-y-1">
                 <p className="font-bold flex items-center gap-1.5">
                   <Sparkles className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
-                  What can Co-Hosts do?
+                  What can Co-Hosts do in the app?
                 </p>
                 <p className="leading-relaxed opacity-90 pl-5 text-[10.5px]">
-                  When co-hosts visit the app and connect with their Google account, they will automatically gain moderation powers to delete inappropriate drops, manage photos, and bypass private mode.
+                  Co-hosts who open their link or sign in get full Owner access: they can view all photos, delete inappropriate guest drops, change gallery settings, download original high-res photos, and invite additional co-hosts.
                 </p>
               </div>
 
               {/* Modal Close Footer */}
-              <div className="pt-2">
+              <div className="pt-1">
                 <button
                   type="button"
                   onClick={() => setShowCoHostsModal(false)}
