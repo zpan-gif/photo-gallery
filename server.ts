@@ -546,22 +546,8 @@ app.get("/api/status", async (req, res) => {
     await updateFolderCredentials(targetFolderId, { coHostKey: folderCreds.coHostKey });
   }
 
-  // 1. Check direct coHostKey authorization (from Co-Host Direct Link)
-  const isKeyAuthorized = Boolean(
-    folderCreds?.coHostKey &&
-    reqCoHostKey &&
-    reqCoHostKey.trim() === folderCreds.coHostKey.trim()
-  );
-
-  if (isKeyAuthorized || (roleParam === "cohost" && isKeyAuthorized)) {
-    canEdit = true;
-    isCoHost = true;
-    userRole = "cohost";
-    coHostPermissions = DEFAULT_COHOST_PERMISSIONS;
-  }
-
-  // 2. Check ownership & Google Drive session capabilities
-  if (!canEdit && targetFolderId && creds && creds.refreshToken) {
+  // 1. Check ownership & Google Drive session capabilities
+  if (targetFolderId && creds && creds.refreshToken) {
     // Is caller the owner?
     const isOwnerAccount = Boolean(
       (folderCreds?.ownerEmail && creds.ownerEmail && folderCreds.ownerEmail.toLowerCase() === creds.ownerEmail.toLowerCase()) ||
@@ -606,27 +592,30 @@ app.get("/api/status", async (req, res) => {
             isOwner = false;
             userRole = "cohost";
             coHostPermissions = DEFAULT_COHOST_PERMISSIONS;
+          } else if (roleParam === "cohost") {
+            userRole = "unauthorized_cohost";
           }
         } catch (e) {
-          // Folder not shared with user or insufficient permissions
+          if (roleParam === "cohost") {
+            userRole = "unauthorized_cohost";
+          }
         }
       }
     }
-  } else if (canEdit && !isOwner) {
-    // If authenticated via key or previously flagged as co-host, look up matching cohost entry for permissions
-    const callerEmail = creds?.ownerEmail?.toLowerCase();
-    if (callerEmail && folderCreds?.coHosts) {
-      const match = folderCreds.coHosts.find((c) => c.email.toLowerCase() === callerEmail);
-      if (match) {
-        coHostPermissions = normalizePermissions(match.permissions);
-      }
-    }
+  } else if (isKeyAuthorized) {
+    // Legacy key authorization (direct key link)
+    canEdit = true;
+    isCoHost = true;
+    userRole = "cohost";
+    coHostPermissions = DEFAULT_COHOST_PERMISSIONS;
+  } else if (roleParam === "cohost") {
+    userRole = "unauthenticated_cohost";
   }
 
-  // If authorized as co-host or owner, determine connection state
-  const isConnected = !!(creds && creds.refreshToken) || (isCoHost && !!(folderCreds && folderCreds.refreshToken));
+  // Caller is ONLY connected if their current browser session has authenticated with Google!
+  const isConnected = !!(creds && creds.refreshToken);
 
-  // If storageQuota wasn't fetched yet (e.g. caller doesn't have direct session) but folderCreds exists, fetch it
+  // If storageQuota wasn't fetched yet but folderCreds exists, fetch it
   if (!storageQuota && isCoHost && folderCreds && folderCreds.refreshToken) {
     try {
       const drive = getAuthorizedDriveClient(folderCreds);
@@ -662,15 +651,15 @@ app.get("/api/status", async (req, res) => {
     connected: isConnected,
     folderId: targetFolderId || (creds ? creds.folderId : null),
     folderName: folderCreds ? (folderCreds.folderName || "App Uploads Gallery") : null,
-    ownerEmail: folderCreds?.ownerEmail || ownerEmail || null,
-    userEmail: creds?.ownerEmail || (isCoHost ? "Co-Host Moderator" : (ownerEmail || null)),
+    ownerEmail: folderCreds?.ownerEmail || (isOwner ? creds?.ownerEmail : null) || null,
+    userEmail: creds?.ownerEmail || (isKeyAuthorized ? "Co-Host (Direct Link)" : null),
     canEdit,
     isHost: canEdit || isOwner || isCoHost,
     isOwner,
     isCoHost,
     userRole,
     coHostPermissions,
-    coHostKey: (canEdit || isCoHost || isOwner) ? folderCreds?.coHostKey : undefined,
+    coHostKey: isOwner ? folderCreds?.coHostKey : undefined,
     coHosts: folderCreds?.coHosts || [],
     allowGuestNames: !!folderCreds?.allowGuestNames,
     hideGuestGallery: !!folderCreds?.hideGuestGallery,
@@ -749,7 +738,7 @@ app.get("/api/oauth/callback", async (req, res) => {
     if (stateStr.includes("ais-dev-")) {
       stateStr = stateStr.replace("ais-dev-", "ais-pre-");
     }
-    if (stateStr.startsWith("http://localhost") || /https:\/\/ais-(dev|pre)-[a-z0-9-]+\.[a-z0-9-.]+/i.test(stateStr)) {
+    if (stateStr.startsWith("http://localhost") || stateStr.startsWith("http://127.0.0.1") || stateStr.startsWith("https://")) {
       redirectOrigin = stateStr;
     }
   }
@@ -874,7 +863,7 @@ app.get("/api/oauth/callback", async (req, res) => {
     });
 
     const destination = redirectOrigin
-      ? `${redirectOrigin}/?status=connected`
+      ? (redirectOrigin.includes("?") ? `${redirectOrigin}&status=connected` : `${redirectOrigin}/?status=connected`)
       : `/?status=connected`;
 
     res.send(`

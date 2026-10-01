@@ -338,7 +338,7 @@ export default function App() {
   );
 
   // Pure Guest View: Shown exclusively to guests without owner/co-host access
-  const isPureGuestView = Boolean(guestFolderId && !isHostView);
+  const isPureGuestView = Boolean(guestFolderId && !isHostView && !isCoHostRoleUrl);
 
   // Dark/Light theme state: Guests default to dark mode; Host/Co-Host view matches owner dashboard
   const darkMode = isPureGuestView;
@@ -673,10 +673,7 @@ export default function App() {
     if (origin.includes("ais-dev-")) {
       origin = origin.replace("ais-dev-", "ais-pre-");
     }
-    const activeKey = status?.coHostKey || coHostKey || (folderId ? localStorage.getItem(`cohost_key_${folderId}`) : null);
-    return activeKey
-      ? `${origin}/?folder=${folderId}&role=cohost&key=${encodeURIComponent(activeKey)}`
-      : `${origin}/?folder=${folderId}&role=cohost`;
+    return `${origin}/?folder=${folderId}&role=cohost`;
   };
 
   const handleCopyCoHostLink = (folderId: string) => {
@@ -685,7 +682,7 @@ export default function App() {
       .then(() => {
         setCopiedCoHostLink(true);
         setTimeout(() => setCopiedCoHostLink(false), 2000);
-        setSuccessMsg("Co-Host direct link copied! Send it to grant full Owner View.");
+        setSuccessMsg("Co-Host invite link copied! Send it to your invited Google accounts.");
       })
       .catch(() => {
         setErrorMsg("Failed to copy link. Please copy manually.");
@@ -981,7 +978,7 @@ export default function App() {
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
     const isInIframe = window.self !== window.top;
 
-    let targetOrigin = window.location.origin;
+    let targetOrigin = window.location.origin + window.location.pathname + window.location.search;
     if (targetOrigin.includes("ais-dev-")) {
       targetOrigin = targetOrigin.replace("ais-dev-", "ais-pre-");
     }
@@ -2769,12 +2766,12 @@ export default function App() {
                     {isCoHost && !isOwner ? (
                       <span className="hidden xs:flex text-[10.5px] sm:text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-800 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
                         <ShieldCheck className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
-                        <span>Co-Host Mode</span>
+                        <span>Co-Host Mode{status?.userEmail ? ` • ${status.userEmail}` : ""}</span>
                       </span>
                     ) : (
                       <span className="hidden xs:flex text-[10.5px] sm:text-[11px] font-semibold text-emerald-850 dark:text-emerald-455 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100/60 dark:border-emerald-900 px-2 sm:px-3 py-1 rounded-full flex items-center gap-1 sm:gap-1.5 shadow-3xs">
                         <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                        <span>Drive Connected</span>
+                        <span>Drive Connected{status?.userEmail ? ` • ${status.userEmail}` : ""}</span>
                       </span>
                     )}
 
@@ -3304,7 +3301,26 @@ export default function App() {
                       <div className="pt-4 border-t border-slate-105 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                         <div className="space-y-1">
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Connected Google Account</p>
-                          <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">{status?.ownerEmail || "Google Drive Connected"}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                              {status?.userEmail || (status?.connected ? (status?.ownerEmail || "Google Drive Connected") : "Not signed in")}
+                            </p>
+                            {isOwner && (
+                              <span className="text-[9.5px] font-mono font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100/70 dark:bg-emerald-950 px-2 py-0.5 rounded-full">
+                                Owner
+                              </span>
+                            )}
+                            {isCoHost && !isOwner && (
+                              <span className="text-[9.5px] font-mono font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-100/70 dark:bg-indigo-950 px-2 py-0.5 rounded-full">
+                                Co-Host
+                              </span>
+                            )}
+                          </div>
+                          {isCoHost && !isOwner && status?.ownerEmail && (
+                            <p className="text-[10.5px] text-slate-400 dark:text-slate-500 font-mono">
+                              Album Owner: {status.ownerEmail}
+                            </p>
+                          )}
                         </div>
                         <div className="flex items-center gap-2 flex-wrap">
                           <button
@@ -3671,6 +3687,97 @@ export default function App() {
           <div className="flex flex-col items-center justify-center py-24 gap-3 bg-white border border-slate-200/80 rounded-[32px]" id="loading_state">
             <RefreshCw className="h-6 w-6 text-slate-500 animate-spin" />
             <p className="text-xs text-slate-400 font-sans font-medium">Loading photos...</p>
+          </div>
+        ) : isCoHostRoleUrl && !status?.connected ? (
+          /* CO-HOST INVITATION SIGN-IN SCREEN */
+          <div className="max-w-md mx-auto my-12 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-3xl p-8 shadow-xl text-center space-y-5 animate-fade-in" id="cohost_invite_login_card">
+            <div className="h-14 w-14 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-100 dark:border-indigo-900 flex items-center justify-center mx-auto text-indigo-600 dark:text-indigo-400 shadow-3xs">
+              <UserPlus className="h-7 w-7" />
+            </div>
+            <div className="space-y-1.5">
+              <h3 className="text-xl font-extrabold text-slate-900 dark:text-slate-100 tracking-tight">
+                Album Co-Host Invitation
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                You've been invited to co-host and moderate:
+              </p>
+              <div className="p-3.5 bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-100 dark:border-slate-700/60 space-y-1 mt-2">
+                <p className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                  {status?.folderName || guestFolderName || "Shared Album"}
+                </p>
+                {status?.ownerEmail && (
+                  <p className="text-[11px] text-slate-400 dark:text-slate-500 font-mono">
+                    Created by {status.ownerEmail}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+              Sign in with your Google account to access this album with host moderation tools.
+            </p>
+
+            <button
+              onClick={handleAdminAuthRedirect}
+              className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-98"
+              id="cohost_google_signin_btn"
+            >
+              <svg className="h-4 w-4" viewBox="0 0 24 24">
+                <path fill="#ffffff" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                <path fill="#ffffff" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#ffffff" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                <path fill="#ffffff" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+              </svg>
+              <span>Sign in with Google</span>
+            </button>
+
+            <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+              <button
+                onClick={() => {
+                  window.location.href = guestFolderId ? `/?folder=${guestFolderId}` : window.location.origin;
+                }}
+                className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 font-semibold cursor-pointer transition-colors"
+              >
+                Just want to upload photos? Open Guest View &rarr;
+              </button>
+            </div>
+          </div>
+        ) : isCoHostRoleUrl && status?.connected && status?.userRole === "unauthorized_cohost" ? (
+          /* SIGNED IN WITH UNINVITED EMAIL */
+          <div className="max-w-md mx-auto my-12 bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-900 rounded-3xl p-8 shadow-xl text-center space-y-5 animate-fade-in" id="cohost_unauthorized_card">
+            <div className="h-14 w-14 rounded-2xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 flex items-center justify-center mx-auto text-amber-600 dark:text-amber-400 shadow-3xs">
+              <ShieldAlert className="h-7 w-7" />
+            </div>
+            <div className="space-y-1.5">
+              <h3 className="text-xl font-extrabold text-slate-900 dark:text-slate-100 tracking-tight">
+                Co-Host Access Restricted
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Signed in as <strong className="text-slate-800 dark:text-slate-200">{status?.userEmail}</strong>
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed pt-1">
+                This Google account is not on the invited co-hosts list for <strong>{status?.folderName || "this album"}</strong>.
+                Please sign in with the email that received the invitation, or ask {status?.ownerEmail ? <strong>{status.ownerEmail}</strong> : "the album owner"} to invite <strong>{status?.userEmail}</strong>.
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                onClick={handleSwitchAccount}
+                className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>Switch Google Account</span>
+              </button>
+              <button
+                onClick={() => {
+                  window.location.href = guestFolderId ? `/?folder=${guestFolderId}` : window.location.origin;
+                }}
+                className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs rounded-xl transition-all cursor-pointer"
+              >
+                Continue as Guest
+              </button>
+            </div>
           </div>
         ) : !status?.connected && !guestFolderId && !coHostKey ? (
           <div className="max-w-4xl mx-auto space-y-10" id="welcome_and_instructions_wrapper">
