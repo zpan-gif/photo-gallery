@@ -464,6 +464,7 @@ export default function App() {
   const [sortBy, setSortBy] = useState<"date_desc" | "date_asc" | "name_asc" | "size_desc">("date_desc");
   const [columnsCount, setColumnsCount] = useState<number>(3); // Slider value 2-6
   const [showFiltersDropdown, setShowFiltersDropdown] = useState(false);
+  const [folderFilterTab, setFolderFilterTab] = useState<"all" | "my" | "shared">("all");
 
   // Selection states
   const [isSelecting, setIsSelecting] = useState(false);
@@ -2766,12 +2767,23 @@ export default function App() {
                         setShowFolderDropdown(next);
                         if (next) fetchFoldersList();
                       }}
-                      className="text-[10.5px] sm:text-[11px] font-bold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200/80 dark:border-slate-700 px-2.5 sm:px-3 py-1 rounded-full flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs"
-                      title="Quick destination folder selector"
+                      className={`text-[10.5px] sm:text-[11px] font-bold border px-2.5 sm:px-3 py-1 rounded-full flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs ${
+                        isCoHost && !isOwner
+                          ? "text-indigo-800 dark:text-indigo-200 bg-indigo-50/80 dark:bg-indigo-950/50 border-indigo-200/90 dark:border-indigo-800 hover:bg-indigo-100/70"
+                          : "text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border-slate-200/80 dark:border-slate-700"
+                      }`}
+                      title={isCoHost && !isOwner ? "Currently viewing Shared Co-Host Album" : "Currently viewing Your Personal Drive Folder"}
                       id="header_quick_folder_dropdown_button"
                     >
-                      <FolderOpen className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                      <FolderOpen className={`h-3.5 w-3.5 shrink-0 ${isCoHost && !isOwner ? "text-indigo-600 dark:text-indigo-400" : "text-amber-500"}`} />
                       <span className="truncate max-w-[90px] sm:max-w-[130px]">{status?.folderName || "Select Folder"}</span>
+                      <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-md ${
+                        isCoHost && !isOwner
+                          ? "bg-indigo-200/80 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-200"
+                          : "bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300"
+                      }`}>
+                        {isCoHost && !isOwner ? "Shared" : "My Folder"}
+                      </span>
                       <ChevronDown className={`h-3 w-3 text-slate-400 shrink-0 transition-transform ${showAdminGuide && showFolderDropdown ? "rotate-180" : ""}`} />
                     </button>
 
@@ -2898,6 +2910,15 @@ export default function App() {
                       <span className="text-[10px] font-bold font-mono px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
                         📁 {status.folderName || "Folder"}
                       </span>
+                      {isCoHost && !isOwner ? (
+                        <span className="text-[9.5px] font-bold font-mono px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                          Shared Album • Co-Host
+                        </span>
+                      ) : (
+                        <span className="text-[9.5px] font-bold font-mono px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                          Your Drive • Owner
+                        </span>
+                      )}
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
                       Destination folder &bull; Google Drive quota &bull; Guest name permissions
@@ -2929,10 +2950,24 @@ export default function App() {
                         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                           <div className="space-y-1">
                             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Current Destination Folder</p>
-                            <div className="flex items-center gap-2">
-                              <FolderOpen className="h-4.5 w-4.5 text-amber-500 shrink-0" />
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <FolderOpen className={`h-4.5 w-4.5 shrink-0 ${isCoHost && !isOwner ? "text-indigo-600 dark:text-indigo-400" : "text-amber-500"}`} />
                               <p className="text-sm font-bold text-slate-800 dark:text-slate-100">{status?.folderName || "None Selected"}</p>
+                              {isCoHost && !isOwner ? (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800">
+                                  Shared Album &bull; Co-Host
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/80 text-emerald-700 dark:text-emerald-300 border border-emerald-200/80 dark:border-emerald-800">
+                                  Your Folder &bull; Owner
+                                </span>
+                              )}
                             </div>
+                            {isCoHost && !isOwner && status?.ownerEmail && (
+                              <p className="text-[11px] text-slate-400 dark:text-slate-500 font-mono">
+                                Album Owner: {status.ownerEmail}
+                              </p>
+                            )}
                           </div>
                           <button
                             onClick={(e) => {
@@ -3020,88 +3055,155 @@ export default function App() {
                                     No other Drive folders found.
                                   </div>
                                 ) : (
-                                  <div className="max-h-56 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl p-1.5 bg-white dark:bg-slate-900 space-y-1 scrollbar-thin">
-                                    {/* Co-Host Shared Folders Section */}
-                                    {sharedFolders.length > 0 && (
-                                      <div className="space-y-1 mb-2">
-                                        <div className="px-2 py-1 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider font-mono flex items-center gap-1.5">
-                                          <ShieldAlert className="h-3 w-3 shrink-0" />
-                                          <span>Shared With You (Co-Host)</span>
-                                        </div>
-                                        {sharedFolders.map((sf) => {
-                                          const isSelected = status?.folderId === sf.id;
-                                          return (
-                                            <button
-                                              key={`shared-${sf.id}`}
-                                              onClick={async (e) => {
-                                                e.stopPropagation();
-                                                await handleSelectFolder(sf.id, sf.name);
-                                                setShowFolderDropdown(false);
-                                                setShowAdminGuide(true);
-                                              }}
-                                              className={`w-full text-left p-2.5 rounded-xl transition-all flex items-center justify-between cursor-pointer border ${isSelected
-                                                ? "bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200 font-bold"
-                                                : "bg-slate-50/40 dark:bg-slate-950/40 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent text-slate-800 dark:text-slate-200"
-                                                }`}
-                                            >
-                                              <div className="flex items-center gap-2.5 min-w-0">
-                                                <FolderOpen className={`h-4 w-4 shrink-0 ${isSelected ? "text-indigo-600 dark:text-indigo-400" : "text-indigo-500"}`} />
-                                                <div className="min-w-0">
-                                                  <span className="text-xs truncate block">{sf.name}</span>
-                                                  <span className="text-[10px] text-slate-400 block truncate">
-                                                    {sf.ownerEmail ? `By ${sf.ownerEmail}` : "Co-Host Album"}
-                                                  </span>
-                                                </div>
-                                              </div>
-                                              {isSelected ? (
-                                                <span className="text-[10px] font-extrabold text-indigo-600 dark:text-indigo-400 bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 rounded-full font-mono">Active</span>
-                                              ) : (
-                                                <ChevronRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                                              )}
-                                            </button>
-                                          );
-                                        })}
-                                      </div>
-                                    )}
+                                  <div className="space-y-2">
+                                    {/* Category Filter Tabs */}
+                                    <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl text-[11px] font-semibold">
+                                      <button
+                                        type="button"
+                                        onClick={() => setFolderFilterTab("all")}
+                                        className={`flex-1 py-1 px-2 rounded-lg transition-all text-center cursor-pointer ${
+                                          folderFilterTab === "all"
+                                            ? "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs font-bold"
+                                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                        }`}
+                                      >
+                                        All ({folders.filter(f => f.name !== "App Uploads Gallery" && !sharedFolders.some(sf => sf.id === f.id)).length + sharedFolders.length})
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setFolderFilterTab("my")}
+                                        className={`flex-1 py-1 px-2 rounded-lg transition-all text-center cursor-pointer ${
+                                          folderFilterTab === "my"
+                                            ? "bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 shadow-xs font-bold"
+                                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                        }`}
+                                      >
+                                        My Folders ({folders.filter(f => f.name !== "App Uploads Gallery" && !sharedFolders.some(sf => sf.id === f.id)).length})
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setFolderFilterTab("shared")}
+                                        className={`flex-1 py-1 px-2 rounded-lg transition-all text-center cursor-pointer ${
+                                          folderFilterTab === "shared"
+                                            ? "bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 shadow-xs font-bold"
+                                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                        }`}
+                                      >
+                                        Shared ({sharedFolders.length})
+                                      </button>
+                                    </div>
 
-                                    {/* Personal Drive Folders Section */}
-                                    {sharedFolders.length > 0 && (
-                                      <div className="px-2 pt-1.5 pb-0.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">
-                                        Your Drive Folders
-                                      </div>
-                                    )}
-
-                                    {folders.map((fld) => {
-                                      if (fld.name === "App Uploads Gallery") return null;
-                                      // Avoid duplicating if folder is already shown in sharedFolders
-                                      if (sharedFolders.some(sf => sf.id === fld.id)) return null;
-                                      const isSelected = status?.folderId === fld.id;
-                                      return (
-                                        <button
-                                          key={fld.id}
-                                          onClick={async (e) => {
-                                            e.stopPropagation();
-                                            await handleSelectFolder(fld.id, fld.name);
-                                            setShowFolderDropdown(false);
-                                            setShowAdminGuide(true);
-                                          }}
-                                          className={`w-full text-left p-2.5 rounded-xl transition-all flex items-center justify-between cursor-pointer border ${isSelected
-                                            ? "bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-200 dark:border-indigo-800 text-indigo-950 dark:text-indigo-200 font-bold"
-                                            : "bg-slate-50/40 dark:bg-slate-950/40 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent text-slate-800 dark:text-slate-200"
-                                            }`}
-                                        >
-                                          <div className="flex items-center gap-2.5 min-w-0">
-                                            <FolderOpen className={`h-4 w-4 shrink-0 ${isSelected ? "text-indigo-600 dark:text-indigo-400" : "text-amber-500"}`} />
-                                            <span className="text-xs truncate">{fld.name}</span>
+                                    <div className="max-h-56 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl p-1.5 bg-white dark:bg-slate-900 space-y-1 scrollbar-thin">
+                                      {/* Co-Host Shared Folders Section */}
+                                      {(folderFilterTab === "all" || folderFilterTab === "shared") && sharedFolders.length > 0 && (
+                                        <div className="space-y-1 mb-2">
+                                          <div className="px-2 py-1 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider font-mono flex items-center justify-between">
+                                            <div className="flex items-center gap-1.5">
+                                              <ShieldAlert className="h-3 w-3 shrink-0" />
+                                              <span>Shared With You (Co-Host)</span>
+                                            </div>
+                                            <span className="text-[9px] font-normal text-slate-400">{sharedFolders.length} albums</span>
                                           </div>
-                                          {isSelected ? (
-                                            <span className="text-[10px] font-extrabold text-indigo-600 dark:text-indigo-400 bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 rounded-full font-mono">Active</span>
-                                          ) : (
-                                            <ChevronRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                                          )}
-                                        </button>
-                                      );
-                                    })}
+                                          {sharedFolders.map((sf) => {
+                                            const isSelected = (guestFolderId ? guestFolderId === sf.id : status?.folderId === sf.id && isCoHost && !isOwner);
+                                            return (
+                                              <button
+                                                key={`shared-${sf.id}`}
+                                                onClick={async (e) => {
+                                                  e.stopPropagation();
+                                                  await handleSelectFolder(sf.id, sf.name);
+                                                  setShowFolderDropdown(false);
+                                                  setShowAdminGuide(true);
+                                                }}
+                                                className={`w-full text-left p-2.5 rounded-xl transition-all flex items-center justify-between cursor-pointer border ${isSelected
+                                                  ? "bg-indigo-50/80 dark:bg-indigo-950/50 border-indigo-300 dark:border-indigo-700 text-indigo-950 dark:text-indigo-200 font-bold shadow-3xs"
+                                                  : "bg-slate-50/40 dark:bg-slate-950/40 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent text-slate-800 dark:text-slate-200"
+                                                  }`}
+                                              >
+                                                <div className="flex items-center gap-2.5 min-w-0">
+                                                  <FolderOpen className="h-4 w-4 shrink-0 text-indigo-600 dark:text-indigo-400" />
+                                                  <div className="min-w-0">
+                                                    <div className="flex items-center gap-1.5">
+                                                      <span className="text-xs truncate block font-bold">{sf.name}</span>
+                                                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded-md bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300">
+                                                        Shared
+                                                      </span>
+                                                    </div>
+                                                    <span className="text-[10px] text-slate-400 block truncate">
+                                                      {sf.ownerEmail ? `Owner: ${sf.ownerEmail}` : "Co-Host Album"}
+                                                    </span>
+                                                  </div>
+                                                </div>
+                                                {isSelected ? (
+                                                  <span className="text-[10px] font-extrabold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-950 px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
+                                                    <ShieldCheck className="h-3 w-3" />
+                                                    Active Co-Host
+                                                  </span>
+                                                ) : (
+                                                  <ChevronRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                                )}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      )}
+
+                                      {/* Personal Drive Folders Section */}
+                                      {(folderFilterTab === "all" || folderFilterTab === "my") && (
+                                        <div className="space-y-1">
+                                          <div className="px-2 pt-1.5 pb-0.5 text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono flex items-center justify-between">
+                                            <span>Your Drive Folders (Owner)</span>
+                                            <span className="text-[9px] font-normal text-slate-400">
+                                              {folders.filter(f => f.name !== "App Uploads Gallery" && !sharedFolders.some(sf => sf.id === f.id)).length} folders
+                                            </span>
+                                          </div>
+
+                                          {folders.map((fld) => {
+                                            if (fld.name === "App Uploads Gallery") return null;
+                                            if (sharedFolders.some(sf => sf.id === fld.id)) return null;
+                                            const isSelected = (!guestFolderId && status?.folderId === fld.id && (!isCoHost || isOwner));
+                                            return (
+                                              <button
+                                                key={fld.id}
+                                                onClick={async (e) => {
+                                                  e.stopPropagation();
+                                                  await handleSelectFolder(fld.id, fld.name);
+                                                  setShowFolderDropdown(false);
+                                                  setShowAdminGuide(true);
+                                                }}
+                                                className={`w-full text-left p-2.5 rounded-xl transition-all flex items-center justify-between cursor-pointer border ${isSelected
+                                                  ? "bg-emerald-50/80 dark:bg-emerald-950/50 border-emerald-300 dark:border-emerald-700 text-emerald-950 dark:text-emerald-200 font-bold shadow-3xs"
+                                                  : "bg-slate-50/40 dark:bg-slate-950/40 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent text-slate-800 dark:text-slate-200"
+                                                  }`}
+                                              >
+                                                <div className="flex items-center gap-2.5 min-w-0">
+                                                  <FolderOpen className={`h-4 w-4 shrink-0 ${isSelected ? "text-emerald-600 dark:text-emerald-400" : "text-amber-500"}`} />
+                                                  <div className="min-w-0">
+                                                    <div className="flex items-center gap-1.5">
+                                                      <span className="text-xs truncate block font-bold">{fld.name}</span>
+                                                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                                                        My Folder
+                                                      </span>
+                                                    </div>
+                                                    <span className="text-[10px] text-slate-400 block truncate">
+                                                      Personal Google Drive
+                                                    </span>
+                                                  </div>
+                                                </div>
+                                                {isSelected ? (
+                                                  <span className="text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950 px-2 py-0.5 rounded-full font-mono flex items-center gap-1">
+                                                    <Check className="h-3 w-3" />
+                                                    Active Owner
+                                                  </span>
+                                                ) : (
+                                                  <ChevronRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                                )}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
                                 )}
                               </div>
@@ -3376,10 +3478,41 @@ export default function App() {
                 {status.folderName || "Photos"}
               </h2>
 
-              {/* Folder indicator subtext */}
-              <p className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-1">
-                📁 Connected Folder &bull; <strong>{photos.length}</strong> {photos.length === 1 ? "photo" : "photos"}
-              </p>
+              {/* Folder indicator subtext with clear ownership status */}
+              <div className="flex items-center gap-2 flex-wrap pt-0.5">
+                {isCoHost && !isOwner ? (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 text-xs font-semibold shadow-3xs">
+                    <ShieldAlert className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                    <span>Shared Album &bull; Co-Host</span>
+                    {status?.ownerEmail && (
+                      <span className="text-[11px] text-slate-400 dark:text-slate-500 font-mono">
+                        (Owner: {status.ownerEmail})
+                      </span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-850 text-emerald-700 dark:text-emerald-300 text-xs font-semibold shadow-3xs">
+                    <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                    <span>Your Folder &bull; Album Owner</span>
+                  </span>
+                )}
+
+                <p className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                  &bull; <strong>{photos.length}</strong> {photos.length === 1 ? "photo" : "photos"}
+                </p>
+
+                <button
+                  onClick={() => {
+                    setShowAdminGuide(true);
+                    setShowFolderDropdown(true);
+                    fetchFoldersList();
+                  }}
+                  className="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-0.5 ml-1 cursor-pointer"
+                >
+                  <span>Switch folder</span>
+                  <ChevronRight className="h-3 w-3" />
+                </button>
+              </div>
 
               {/* Simplified Share Card */}
               {status.folderName !== "App Uploads Gallery" && (
@@ -3885,59 +4018,121 @@ export default function App() {
                     <p className="text-xs text-slate-500 dark:text-slate-400">No Drive folders found.</p>
                   </div>
                 ) : (
-                  <div className="max-h-60 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl p-2 bg-slate-50/30 dark:bg-slate-950/20 space-y-2 scrollbar-thin">
-                    {/* Shared / Co-Host Albums */}
-                    {sharedFolders.length > 0 && (
-                      <div className="space-y-1.5 mb-2">
-                        <div className="px-2 py-1 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider font-mono flex items-center gap-1.5">
-                          <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
-                          <span>Shared With You (Co-Host)</span>
-                        </div>
-                        {sharedFolders.map((sf) => (
-                          <button
-                            key={`onboarding-shared-${sf.id}`}
-                            onClick={() => handleSelectFolder(sf.id, sf.name)}
-                            className="w-full text-left p-3 bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-800/80 hover:bg-indigo-100/70 dark:hover:bg-indigo-900/50 rounded-xl transition-all flex items-center justify-between cursor-pointer shadow-3xs"
-                          >
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              <FolderOpen className="h-4.5 w-4.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                              <div className="min-w-0">
-                                <span className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate block">{sf.name}</span>
-                                <span className="text-[10px] text-slate-500 dark:text-slate-400 block truncate">
-                                  {sf.ownerEmail ? `By ${sf.ownerEmail}` : "Co-Host Album"}
-                                </span>
-                              </div>
+                  <div className="space-y-2">
+                    {/* Category Filter Tabs */}
+                    <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl text-[11px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => setFolderFilterTab("all")}
+                        className={`flex-1 py-1 px-2 rounded-lg transition-all text-center cursor-pointer ${
+                          folderFilterTab === "all"
+                            ? "bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-xs font-bold"
+                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                        }`}
+                      >
+                        All ({folders.filter(f => f.name !== "App Uploads Gallery" && !sharedFolders.some(sf => sf.id === f.id)).length + sharedFolders.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFolderFilterTab("my")}
+                        className={`flex-1 py-1 px-2 rounded-lg transition-all text-center cursor-pointer ${
+                          folderFilterTab === "my"
+                            ? "bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 shadow-xs font-bold"
+                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                        }`}
+                      >
+                        My Folders ({folders.filter(f => f.name !== "App Uploads Gallery" && !sharedFolders.some(sf => sf.id === f.id)).length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setFolderFilterTab("shared")}
+                        className={`flex-1 py-1 px-2 rounded-lg transition-all text-center cursor-pointer ${
+                          folderFilterTab === "shared"
+                            ? "bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 shadow-xs font-bold"
+                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                        }`}
+                      >
+                        Shared ({sharedFolders.length})
+                      </button>
+                    </div>
+
+                    <div className="max-h-60 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl p-2 bg-slate-50/30 dark:bg-slate-950/20 space-y-2 scrollbar-thin">
+                      {/* Shared / Co-Host Albums */}
+                      {(folderFilterTab === "all" || folderFilterTab === "shared") && sharedFolders.length > 0 && (
+                        <div className="space-y-1.5 mb-2">
+                          <div className="px-2 py-1 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider font-mono flex items-center justify-between">
+                            <div className="flex items-center gap-1.5">
+                              <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+                              <span>Shared With You (Co-Host)</span>
                             </div>
-                            <ChevronRight className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Personal Drive Folders */}
-                    {sharedFolders.length > 0 && (
-                      <div className="px-2 pt-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">
-                        Your Drive Folders
-                      </div>
-                    )}
-
-                    {folders.map((fld) => {
-                      if (fld.name === "App Uploads Gallery") return null;
-                      if (sharedFolders.some(sf => sf.id === fld.id)) return null;
-                      return (
-                        <button
-                          key={fld.id}
-                          onClick={() => handleSelectFolder(fld.id, fld.name)}
-                          className="w-full text-left p-3 bg-white dark:bg-slate-900 border border-slate-150/40 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/80 rounded-xl transition-all flex items-center justify-between cursor-pointer shadow-3xs"
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <FolderOpen className="h-4.5 w-4.5 text-amber-500 shrink-0" />
-                            <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">{fld.name}</span>
+                            <span className="text-[9px] font-normal text-slate-400">{sharedFolders.length} albums</span>
                           </div>
-                          <ChevronRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                        </button>
-                      );
-                    })}
+                          {sharedFolders.map((sf) => (
+                            <button
+                              key={`onboarding-shared-${sf.id}`}
+                              onClick={() => handleSelectFolder(sf.id, sf.name)}
+                              className="w-full text-left p-3 bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-800/80 hover:bg-indigo-100/70 dark:hover:bg-indigo-900/50 rounded-xl transition-all flex items-center justify-between cursor-pointer shadow-3xs"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <FolderOpen className="h-4.5 w-4.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate block">{sf.name}</span>
+                                    <span className="text-[9px] font-mono px-1.5 py-0.2 rounded-md bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300">
+                                      Shared
+                                    </span>
+                                  </div>
+                                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block truncate">
+                                    {sf.ownerEmail ? `Owner: ${sf.ownerEmail}` : "Co-Host Album"}
+                                  </span>
+                                </div>
+                              </div>
+                              <ChevronRight className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Personal Drive Folders */}
+                      {(folderFilterTab === "all" || folderFilterTab === "my") && (
+                        <div className="space-y-1.5">
+                          <div className="px-2 pt-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono flex items-center justify-between">
+                            <span>Your Drive Folders (Owner)</span>
+                            <span className="text-[9px] font-normal text-slate-400">
+                              {folders.filter(f => f.name !== "App Uploads Gallery" && !sharedFolders.some(sf => sf.id === f.id)).length} folders
+                            </span>
+                          </div>
+
+                          {folders.map((fld) => {
+                            if (fld.name === "App Uploads Gallery") return null;
+                            if (sharedFolders.some(sf => sf.id === fld.id)) return null;
+                            return (
+                              <button
+                                key={fld.id}
+                                onClick={() => handleSelectFolder(fld.id, fld.name)}
+                                className="w-full text-left p-3 bg-white dark:bg-slate-900 border border-slate-150/40 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/80 rounded-xl transition-all flex items-center justify-between cursor-pointer shadow-3xs"
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <FolderOpen className="h-4.5 w-4.5 text-amber-500 shrink-0" />
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">{fld.name}</span>
+                                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                                        My Folder
+                                      </span>
+                                    </div>
+                                    <span className="text-[10px] text-slate-400 block truncate">
+                                      Personal Google Drive
+                                    </span>
+                                  </div>
+                                </div>
+                                <ChevronRight className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
