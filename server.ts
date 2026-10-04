@@ -185,27 +185,71 @@ function getFileFallbackCredentials(): SavedCredentials | null {
 async function saveCredentials(sessionId: string, creds: SavedCredentials) {
   const credsWithSession: SavedCredentials = { ...creds, ownerSessionId: sessionId };
   sessionCredentialsCache.set(sessionId, { data: credsWithSession, expires: Date.now() + CACHE_TTL_MS });
-  if (creds.folderId) {
-    folderCredentialsCache.set(creds.folderId, { data: credsWithSession, expires: Date.now() + CACHE_TTL_MS });
-    saveLocalFoldersMetadata(creds.folderId, {
-      folderId: creds.folderId,
-      folderName: creds.folderName,
-      ownerEmail: creds.ownerEmail,
-      refreshToken: creds.refreshToken,
-      ownerSessionId: sessionId,
-      allowGuestNames: !!creds.allowGuestNames,
-      hideGuestGallery: !!creds.hideGuestGallery,
-      coHosts: creds.coHosts || [],
-      coHostKey: creds.coHostKey || null,
-      updatedAt: Date.now(),
-    });
-  }
 
-  try {
-    const filePath = path.join(process.cwd(), "drive-credentials.json");
-    fs.writeFileSync(filePath, JSON.stringify(credsWithSession, null, 2));
-  } catch (e) {
-    console.error("Error writing fallback credentials:", e);
+  if (creds.folderId) {
+    const existingFolder = await getSavedCredentialsForFolder(creds.folderId);
+    const callerEmail = (creds.ownerEmail || "").toLowerCase();
+    const existingOwnerEmail = (existingFolder?.ownerEmail || "").toLowerCase();
+
+    // Caller is folder owner if:
+    // 1) Folder doesn't exist yet, OR
+    // 2) Caller's email matches existing folder's ownerEmail, OR
+    // 3) Existing folder has caller's sessionId as ownerSessionId
+    const isFolderOwner = !existingFolder || 
+      (callerEmail && existingOwnerEmail && callerEmail === existingOwnerEmail) ||
+      (!existingOwnerEmail && existingFolder.ownerSessionId === sessionId);
+
+    if (isFolderOwner) {
+      const mergedCoHosts = creds.coHosts !== undefined ? creds.coHosts : (existingFolder?.coHosts || []);
+      const mergedCoHostKey = creds.coHostKey || existingFolder?.coHostKey || null;
+      const mergedAllowGuestNames = creds.allowGuestNames !== undefined ? creds.allowGuestNames : (existingFolder?.allowGuestNames || false);
+      const mergedHideGuestGallery = creds.hideGuestGallery !== undefined ? creds.hideGuestGallery : (existingFolder?.hideGuestGallery || false);
+
+      const folderDataToSave: SavedCredentials = {
+        folderId: creds.folderId,
+        folderName: creds.folderName || existingFolder?.folderName || "App Uploads Gallery",
+        ownerEmail: creds.ownerEmail || existingFolder?.ownerEmail || undefined,
+        refreshToken: creds.refreshToken || existingFolder?.refreshToken,
+        ownerSessionId: sessionId,
+        allowGuestNames: !!mergedAllowGuestNames,
+        hideGuestGallery: !!mergedHideGuestGallery,
+        coHosts: mergedCoHosts,
+        coHostKey: mergedCoHostKey || undefined,
+      };
+
+      folderCredentialsCache.set(creds.folderId, { data: folderDataToSave, expires: Date.now() + CACHE_TTL_MS });
+      saveLocalFoldersMetadata(creds.folderId, folderDataToSave);
+
+      if (db) {
+        try {
+          await db.collection("folders").doc(creds.folderId).set({
+            ...folderDataToSave,
+            updatedAt: Date.now(),
+          }, { merge: true });
+        } catch (e) {
+          console.error("Error writing folder credentials to Firestore:", e);
+        }
+      }
+
+      try {
+        const filePath = path.join(process.cwd(), "drive-credentials.json");
+        fs.writeFileSync(filePath, JSON.stringify(credsWithSession, null, 2));
+      } catch (e) {
+        console.error("Error writing fallback credentials:", e);
+      }
+    } else {
+      // Co-host or non-owner: preserve existing folder credentials in memory cache
+      if (existingFolder) {
+        folderCredentialsCache.set(creds.folderId, { data: existingFolder, expires: Date.now() + CACHE_TTL_MS });
+      }
+    }
+  } else {
+    try {
+      const filePath = path.join(process.cwd(), "drive-credentials.json");
+      fs.writeFileSync(filePath, JSON.stringify(credsWithSession, null, 2));
+    } catch (e) {
+      console.error("Error writing fallback credentials:", e);
+    }
   }
 
   if (!db) {
@@ -213,20 +257,6 @@ async function saveCredentials(sessionId: string, creds: SavedCredentials) {
   }
   try {
     await db.collection("sessions").doc(sessionId).set(credsWithSession, { merge: true });
-    if (creds.folderId) {
-      await db.collection("folders").doc(creds.folderId).set({
-        folderId: creds.folderId,
-        folderName: creds.folderName || "App Uploads Gallery",
-        ownerEmail: creds.ownerEmail || null,
-        refreshToken: creds.refreshToken,
-        ownerSessionId: sessionId,
-        allowGuestNames: !!creds.allowGuestNames,
-        hideGuestGallery: !!creds.hideGuestGallery,
-        coHosts: creds.coHosts || [],
-        coHostKey: creds.coHostKey || null,
-        updatedAt: Date.now(),
-      }, { merge: true });
-    }
   } catch (e) {
     console.error("Error writing credentials to Firestore:", e);
   }
@@ -933,17 +963,17 @@ app.get("/api/photos", async (req, res) => {
   }
 
   try {
-    let creds = queryFolderId ? await getSavedCredentialsForFolder(queryFolderId) : null;
     let ownerCreds = await getSavedCredentials(sessionId);
-    if (!creds) {
-      creds = ownerCreds;
-    }
-    if (!creds) {
+    const folderId = queryFolderId || ownerCreds?.folderId;
+    if (!folderId) {
       return res.json({ connected: false, photos: [] });
     }
 
-    const folderId = queryFolderId || creds.folderId;
-    if (!folderId) {
+    let creds = await getSavedCredentialsForFolder(folderId);
+    if (!creds) {
+      creds = ownerCreds;
+    }
+    if (!creds || !creds.refreshToken) {
       return res.json({ connected: false, photos: [] });
     }
 
