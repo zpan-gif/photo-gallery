@@ -524,45 +524,51 @@ export default function App() {
 
       const statusQuery = statusParams.toString();
       const statusUrl = statusQuery ? `/api/status?${statusQuery}` : "/api/status";
-      const statusRes = await fetch(statusUrl, {
-        headers: { ...(activeKey ? { "x-cohost-key": activeKey } : {}) }
-      });
-      if (!statusRes.ok) throw new Error("Failed to load server auth status");
-      const statusData: ServerStatus = await statusRes.json();
-      setStatus(statusData);
-      if (statusData.coHostKey) {
-        setCoHostKey(statusData.coHostKey);
-        const fid = guestFolderId || statusData.folderId;
-        if (fid) {
-          try { localStorage.setItem(`cohost_key_${fid}`, statusData.coHostKey); } catch {}
-        }
-      }
 
-      // Dynamically fetch photos based on guest or owner view
-      const targetFolderId = guestFolderId || statusData.folderId;
-      if (targetFolderId) {
-        if (targetFolderId === "demo") {
+      // If active folder is known (e.g. guest view), fetch status and photos in PARALLEL
+      if (guestFolderId) {
+        if (guestFolderId === "demo") {
           setPhotos(DEMO_PHOTOS);
           setGuestFolderName("Wedding Celebration Demo");
+          const statusRes = await fetch(statusUrl, {
+            headers: { ...(activeKey ? { "x-cohost-key": activeKey } : {}) }
+          });
+          if (statusRes.ok) {
+            const statusData: ServerStatus = await statusRes.json();
+            setStatus(statusData);
+          }
         } else {
           const myUploadsParam = encodeURIComponent(JSON.stringify(myUploads));
-          const effectiveKey = activeKey || statusData.coHostKey;
+          const effectiveKey = activeKey;
           const photoParams = new URLSearchParams({
-            folderId: targetFolderId,
+            folderId: guestFolderId,
             myUploads: myUploadsParam,
           });
           if (effectiveKey) photoParams.set("key", effectiveKey);
 
-          const photoRes = await fetch(`/api/photos?${photoParams.toString()}`, {
-            headers: { ...(effectiveKey ? { "x-cohost-key": effectiveKey } : {}) }
-          });
+          // Concurrent fetch for maximum speed
+          const [statusRes, photoRes] = await Promise.all([
+            fetch(statusUrl, { headers: { ...(effectiveKey ? { "x-cohost-key": effectiveKey } : {}) } }),
+            fetch(`/api/photos?${photoParams.toString()}`, { headers: { ...(effectiveKey ? { "x-cohost-key": effectiveKey } : {}) } }),
+          ]);
+
+          if (!statusRes.ok) throw new Error("Failed to load server auth status");
+          const statusData: ServerStatus = await statusRes.json();
+          setStatus(statusData);
+          if (statusData.allowGuestNames !== undefined) setAllowGuestNames(!!statusData.allowGuestNames);
+          if (statusData.hideGuestGallery !== undefined) setHideGuestGallery(!!statusData.hideGuestGallery);
+          if (statusData.coHostKey) {
+            setCoHostKey(statusData.coHostKey);
+            try { localStorage.setItem(`cohost_key_${guestFolderId}`, statusData.coHostKey); } catch {}
+          }
+
           if (photoRes.ok) {
             const photoData = await photoRes.json();
             setPhotos(photoData.photos || []);
             if (photoData.hideGuestGallery !== undefined) {
               setHideGuestGallery(!!photoData.hideGuestGallery);
             }
-            if (guestFolderId && photoData.folderName) {
+            if (photoData.folderName) {
               setGuestFolderName(photoData.folderName);
             }
             // Merge co-host capability into status state
@@ -578,20 +584,44 @@ export default function App() {
           }
         }
       } else {
-        setPhotos([]);
-      }
-      // Fetch gallery settings (allowGuestNames, hideGuestGallery) based on active folder
-      const settingsFolderId = guestFolderId || statusData.folderId;
-      if (settingsFolderId) {
-        try {
-          const settingsRes = await fetch(`/api/settings?folderId=${settingsFolderId}`);
-          if (settingsRes.ok) {
-            const settingsData = await settingsRes.json();
-            setAllowGuestNames(!!settingsData.allowGuestNames);
-            setHideGuestGallery(!!settingsData.hideGuestGallery);
+        // Owner view without folder in URL: fetch status first, then photos once folderId is discovered
+        const statusRes = await fetch(statusUrl, {
+          headers: { ...(activeKey ? { "x-cohost-key": activeKey } : {}) }
+        });
+        if (!statusRes.ok) throw new Error("Failed to load server auth status");
+        const statusData: ServerStatus = await statusRes.json();
+        setStatus(statusData);
+        if (statusData.allowGuestNames !== undefined) setAllowGuestNames(!!statusData.allowGuestNames);
+        if (statusData.hideGuestGallery !== undefined) setHideGuestGallery(!!statusData.hideGuestGallery);
+        if (statusData.coHostKey && statusData.folderId) {
+          setCoHostKey(statusData.coHostKey);
+          try { localStorage.setItem(`cohost_key_${statusData.folderId}`, statusData.coHostKey); } catch {}
+        }
+
+        if (statusData.folderId) {
+          const myUploadsParam = encodeURIComponent(JSON.stringify(myUploads));
+          const effectiveKey = activeKey || statusData.coHostKey;
+          const photoParams = new URLSearchParams({
+            folderId: statusData.folderId,
+            myUploads: myUploadsParam,
+          });
+          if (effectiveKey) photoParams.set("key", effectiveKey);
+
+          const photoRes = await fetch(`/api/photos?${photoParams.toString()}`, {
+            headers: { ...(effectiveKey ? { "x-cohost-key": effectiveKey } : {}) }
+          });
+          if (photoRes.ok) {
+            const photoData = await photoRes.json();
+            setPhotos(photoData.photos || []);
+            if (photoData.hideGuestGallery !== undefined) {
+              setHideGuestGallery(!!photoData.hideGuestGallery);
+            }
+            if (photoData.folderName) {
+              setGuestFolderName(photoData.folderName);
+            }
           }
-        } catch (e) {
-          console.error("Failed to fetch settings:", e);
+        } else {
+          setPhotos([]);
         }
       }
     } catch (err: any) {
@@ -1927,7 +1957,7 @@ export default function App() {
       return localMediaBlobs[photo.id];
     }
     if (photo.thumbnailLink) {
-      return photo.thumbnailLink.replace(/=s\d+$/, '=s600');
+      return photo.thumbnailLink.replace(/=s\d+$/, '=s400');
     }
     return getPhotoViewUrl(photo.id);
   };
@@ -4203,7 +4233,6 @@ export default function App() {
                 return (
                   <motion.div
                     key={photo.id}
-                    layout
                     initial={{ opacity: 0, scale: 0.95 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.95 }}

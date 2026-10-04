@@ -400,7 +400,53 @@ const upload = multer({
 const recentUploadsCache = new Map<string, { path: string; mimeType: string; expires: number }>();
 const fileMimeCache = new Map<string, { mimeType: string; expires: number }>();
 
-// Periodic cleanup of cached temp files
+// High-speed in-memory caches to eliminate Google Drive API latency for guests
+const storageQuotaCache = new Map<string, { quota: any; expires: number }>();
+const folderNameCache = new Map<string, string>();
+const photosListCache = new Map<string, { photos: any[]; expires: number }>();
+
+// Helper to fetch and cache Google Drive storage quota (5-minute TTL)
+async function fetchStorageQuota(creds: SavedCredentials): Promise<any | null> {
+  if (!creds || !creds.refreshToken) return null;
+  const cacheKey = creds.ownerEmail || creds.refreshToken;
+  const cached = storageQuotaCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) {
+    return cached.quota;
+  }
+  try {
+    const drive = getAuthorizedDriveClient(creds);
+    const aboutRes = await drive.about.get({ fields: "storageQuota" });
+    if (aboutRes.data && aboutRes.data.storageQuota) {
+      const quota = aboutRes.data.storageQuota;
+      const limitStr = quota.limit ? String(quota.limit) : "0";
+      const usageStr = quota.usage ? String(quota.usage) : "0";
+      const limitNum = parseInt(limitStr, 10);
+      const usageNum = parseInt(usageStr, 10);
+      let percentageUsed = 0;
+      let isNearingLimit = false;
+      if (limitNum > 0) {
+        percentageUsed = (usageNum / limitNum) * 100;
+        const remainingNum = limitNum - usageNum;
+        if (percentageUsed >= 85 || remainingNum < 1500000000) {
+          isNearingLimit = true;
+        }
+      }
+      const result = {
+        limit: limitStr,
+        usage: usageStr,
+        percentageUsed: Math.round(percentageUsed * 10) / 10,
+        isNearingLimit,
+      };
+      storageQuotaCache.set(cacheKey, { quota: result, expires: Date.now() + 5 * 60 * 1000 });
+      return result;
+    }
+  } catch (e) {
+    console.error("Failed to fetch Google Drive storage quota:", e);
+  }
+  return null;
+}
+
+// Periodic cleanup of cached temp files and expired memory caches
 setInterval(() => {
   const now = Date.now();
   for (const [id, item] of recentUploadsCache.entries()) {
@@ -414,6 +460,16 @@ setInterval(() => {
   for (const [id, item] of fileMimeCache.entries()) {
     if (item.expires < now) {
       fileMimeCache.delete(id);
+    }
+  }
+  for (const [id, item] of storageQuotaCache.entries()) {
+    if (item.expires < now) {
+      storageQuotaCache.delete(id);
+    }
+  }
+  for (const [id, item] of photosListCache.entries()) {
+    if (item.expires < now) {
+      photosListCache.delete(id);
     }
   }
 }, 60 * 1000);
@@ -480,45 +536,6 @@ app.get("/api/status", async (req, res) => {
     }
   }
 
-  let storageQuota = null;
-  if (creds && creds.refreshToken) {
-    try {
-      const drive = getAuthorizedDriveClient(creds);
-      const aboutRes = await drive.about.get({
-        fields: "storageQuota",
-      });
-      if (aboutRes.data && aboutRes.data.storageQuota) {
-        const quota = aboutRes.data.storageQuota;
-        const limitStr = quota.limit ? String(quota.limit) : "0";
-        const usageStr = quota.usage ? String(quota.usage) : "0";
-        
-        const limitNum = parseInt(limitStr, 10);
-        const usageNum = parseInt(usageStr, 10);
-        
-        let percentageUsed = 0;
-        let isNearingLimit = false;
-        
-        if (limitNum > 0) {
-          percentageUsed = (usageNum / limitNum) * 100;
-          // Drive standard limit is usually 15 GB, trigger warning if used exceeds 85% or remaining is less than 1.5 GB
-          const remainingNum = limitNum - usageNum;
-          if (percentageUsed >= 85 || remainingNum < 1500000000) {
-            isNearingLimit = true;
-          }
-        }
-        
-        storageQuota = {
-          limit: limitStr,
-          usage: usageStr,
-          percentageUsed: Math.round(percentageUsed * 10) / 10,
-          isNearingLimit,
-        };
-      }
-    } catch (e) {
-      console.error("Failed to fetch Google Drive storage quota:", e);
-    }
-  }
-
   const queryFolderId = req.query.folderId as string;
   const targetFolderId = queryFolderId || creds?.folderId;
   const reqCoHostKey = (req.query.key || req.query.cohostKey || req.headers["x-cohost-key"]) as string | undefined;
@@ -545,6 +562,16 @@ app.get("/api/status", async (req, res) => {
     folderCreds.coHostKey = crypto.randomBytes(16).toString("hex");
     await updateFolderCredentials(targetFolderId, { coHostKey: folderCreds.coHostKey });
   }
+
+  if (targetFolderId && folderCreds?.folderName) {
+    folderNameCache.set(targetFolderId, folderCreds.folderName);
+  }
+
+  const isKeyAuthorized = Boolean(
+    folderCreds?.coHostKey &&
+    reqCoHostKey &&
+    reqCoHostKey.trim() === folderCreds.coHostKey.trim()
+  );
 
   // 1. Check ownership & Google Drive session capabilities
   if (targetFolderId && creds && creds.refreshToken) {
@@ -577,8 +604,8 @@ app.get("/api/status", async (req, res) => {
         isOwner = false;
         userRole = "cohost";
         coHostPermissions = normalizePermissions(matchingCoHost.permissions);
-      } else {
-        // Check direct Google Drive capabilities
+      } else if (roleParam === "cohost") {
+        // Only check direct Google Drive capabilities if the caller specifically requested cohost role
         try {
           const drive = getAuthorizedDriveClient(creds);
           const folderCheck = await drive.files.get({
@@ -592,13 +619,11 @@ app.get("/api/status", async (req, res) => {
             isOwner = false;
             userRole = "cohost";
             coHostPermissions = DEFAULT_COHOST_PERMISSIONS;
-          } else if (roleParam === "cohost") {
+          } else {
             userRole = "unauthorized_cohost";
           }
         } catch (e) {
-          if (roleParam === "cohost") {
-            userRole = "unauthorized_cohost";
-          }
+          userRole = "unauthorized_cohost";
         }
       }
     }
@@ -615,36 +640,12 @@ app.get("/api/status", async (req, res) => {
   // Caller is ONLY connected if their current browser session has authenticated with Google!
   const isConnected = !!(creds && creds.refreshToken);
 
-  // If storageQuota wasn't fetched yet but folderCreds exists, fetch it
-  if (!storageQuota && isCoHost && folderCreds && folderCreds.refreshToken) {
-    try {
-      const drive = getAuthorizedDriveClient(folderCreds);
-      const aboutRes = await drive.about.get({ fields: "storageQuota" });
-      if (aboutRes.data && aboutRes.data.storageQuota) {
-        const quota = aboutRes.data.storageQuota;
-        const limitStr = quota.limit ? String(quota.limit) : "0";
-        const usageStr = quota.usage ? String(quota.usage) : "0";
-        const limitNum = parseInt(limitStr, 10);
-        const usageNum = parseInt(usageStr, 10);
-        let percentageUsed = 0;
-        let isNearingLimit = false;
-        if (limitNum > 0) {
-          percentageUsed = (usageNum / limitNum) * 100;
-          const remainingNum = limitNum - usageNum;
-          if (percentageUsed >= 85 || remainingNum < 1500000000) {
-            isNearingLimit = true;
-          }
-        }
-        storageQuota = {
-          limit: limitStr,
-          usage: usageStr,
-          percentageUsed: Math.round(percentageUsed * 10) / 10,
-          isNearingLimit,
-        };
-      }
-    } catch (e) {
-      console.error("Failed to fetch Google Drive storage quota for co-host:", e);
-    }
+  // Storage quota is ONLY fetched for owners and cohosts — pure guests never wait for quota!
+  let storageQuota = null;
+  if (isOwner && creds) {
+    storageQuota = await fetchStorageQuota(creds);
+  } else if (isCoHost && folderCreds) {
+    storageQuota = await fetchStorageQuota(folderCreds);
   }
 
   res.json({
@@ -964,7 +965,7 @@ app.get("/api/photos", async (req, res) => {
         isCoHost = creds.coHosts.some(c => c.email.toLowerCase() === ownerCreds.ownerEmail!.toLowerCase());
       }
 
-      if (!isOwner && !isCoHost) {
+      if (!isOwner && !isCoHost && (req.query.role === "cohost" || req.headers["x-cohost-key"])) {
         try {
           const userDrive = getAuthorizedDriveClient(ownerCreds);
           const folderCheck = await userDrive.files.get({
@@ -985,38 +986,50 @@ app.get("/api/photos", async (req, res) => {
     const isHostOrCoHost = isOwner || isCoHost;
     const userRole = isOwner ? "owner" : (isCoHost ? "cohost" : "guest");
 
-    // If a custom folderId is specified, fetch its metadata to get the name
+    // Use cached folder name if available to avoid an extra drive.files.get roundtrip
     let folderName = creds.folderName || "App Uploads Gallery";
-    if (queryFolderId && queryFolderId !== creds.folderId) {
+    if (folderNameCache.has(folderId)) {
+      folderName = folderNameCache.get(folderId)!;
+    } else if (queryFolderId && queryFolderId !== creds.folderId) {
       try {
         const folderMeta = await drive.files.get({
           fileId: queryFolderId,
           fields: "name",
         });
         folderName = folderMeta.data.name || "Shared Gallery";
+        folderNameCache.set(queryFolderId, folderName);
       } catch (err) {
         console.error("Failed fetching guest folder metadata:", err);
         folderName = "Shared Gallery";
       }
+    } else if (creds.folderName) {
+      folderNameCache.set(folderId, creds.folderName);
     }
 
     let allFiles: any[] = [];
-    let pageToken: string | undefined = undefined;
+    const cachedList = photosListCache.get(folderId);
+    if (cachedList && cachedList.expires > Date.now()) {
+      allFiles = cachedList.photos;
+    } else {
+      let pageToken: string | undefined = undefined;
 
-    do {
-      const driveRes: any = await drive.files.list({
-        q: `'${folderId}' in parents and trashed = false`,
-        fields: "nextPageToken, files(id, name, mimeType, createdTime, size, thumbnailLink)",
-        orderBy: "createdTime desc",
-        pageSize: 1000,
-        pageToken: pageToken,
-      });
+      do {
+        const driveRes: any = await drive.files.list({
+          q: `'${folderId}' in parents and trashed = false`,
+          fields: "nextPageToken, files(id, name, mimeType, createdTime, size, thumbnailLink)",
+          orderBy: "createdTime desc",
+          pageSize: 1000,
+          pageToken: pageToken,
+        });
 
-      if (driveRes.data.files && driveRes.data.files.length > 0) {
-        allFiles.push(...driveRes.data.files);
-      }
-      pageToken = driveRes.data.nextPageToken || undefined;
-    } while (pageToken);
+        if (driveRes.data.files && driveRes.data.files.length > 0) {
+          allFiles.push(...driveRes.data.files);
+        }
+        pageToken = driveRes.data.nextPageToken || undefined;
+      } while (pageToken);
+
+      photosListCache.set(folderId, { photos: allFiles, expires: Date.now() + 15 * 1000 });
+    }
     const hideGuestGallery = !!creds.hideGuestGallery;
 
     // If Private Guest Mode is active AND caller is a guest (not owner or co-host)
@@ -1303,6 +1316,8 @@ app.post("/api/upload", (req, res, next) => {
       expires: Date.now() + 30 * 60 * 1000,
     });
 
+    photosListCache.delete(targetFolderId);
+
     res.json({
       success: true,
       fileId: driveResponse.data.id,
@@ -1378,6 +1393,9 @@ app.post("/api/delete/:fileId", async (req, res) => {
         trashed: true,
       },
     });
+
+    const targetFolderId = queryFolderId || driveCreds?.folderId;
+    if (targetFolderId) photosListCache.delete(targetFolderId);
 
     res.json({ success: true, message: "Photo successfully sent to owner's drive trash bin." });
   } catch (err: any) {
@@ -1537,6 +1555,8 @@ app.post("/api/folders/select", async (req, res) => {
     }
     creds.folderId = folderId;
     creds.folderName = folderName;
+    photosListCache.delete(folderId);
+    folderNameCache.set(folderId, folderName);
     await saveCredentials(sessionId, creds);
 
     // If caller is primary owner of this folder, also ensure folder document is kept up to date
