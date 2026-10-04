@@ -1148,8 +1148,12 @@ export default function App() {
             setFolders([]);
             sessionStorage.removeItem("photo_deck_folder_clicked");
             setHasClickedFolder(false);
+            const activeFolder = guestFolderId || status?.folderId;
+            if (activeFolder) {
+              try { localStorage.removeItem(`cohost_key_${activeFolder}`); } catch {}
+            }
             if (guestFolderId) {
-              window.location.href = window.location.origin;
+              window.location.href = `/?folder=${guestFolderId}`;
             } else {
               fetchStatusAndPhotos();
             }
@@ -2843,21 +2847,13 @@ export default function App() {
                       <ChevronDown className={`h-3 w-3 transition-transform duration-200 ${showAdminGuide ? "rotate-180" : ""}`} />
                     </button>
                     <button
-                      onClick={() => {
-                        if (isCoHost && !isOwner) {
-                          const activeFolder = guestFolderId || status?.folderId;
-                          if (activeFolder) localStorage.removeItem(`cohost_key_${activeFolder}`);
-                          window.location.href = activeFolder ? `/?folder=${activeFolder}` : window.location.origin;
-                        } else {
-                          handleDisconnect();
-                        }
-                      }}
+                      onClick={handleDisconnect}
                       className="text-[10.5px] sm:text-[11px] font-bold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 hover:bg-red-100 dark:hover:bg-red-900/40 border border-red-200 dark:border-red-900 px-2.5 sm:px-3 py-1 rounded-full flex items-center gap-1.5 transition-all cursor-pointer shadow-3xs"
-                      title={isCoHost && !isOwner ? "Exit Co-Host Mode" : "Sign out of Google Drive"}
+                      title="Sign out of Google Drive"
                       id="header_sign_out_button"
                     >
                       <LogOut className="h-3 w-3" />
-                      <span className="hidden sm:inline">{isCoHost && !isOwner ? "Exit Co-Host" : "Sign Out"}</span>
+                      <span className="hidden sm:inline">Sign Out</span>
                     </button>
                   </div>
                 )}
