@@ -351,23 +351,43 @@ async function getSavedCredentialsForFolder(folderId: string): Promise<SavedCred
   return null;
 }
 
+// Extract pure origin (protocol + host + port) avoiding search queries or path fragments in OAuth redirect URIs
+function extractOriginBaseUrl(rawUrl?: string): string {
+  if (!rawUrl) return "";
+  try {
+    const parsed = new URL(rawUrl);
+    let origin = parsed.origin;
+    if (origin.includes("ais-dev-")) {
+      origin = origin.replace("ais-dev-", "ais-pre-");
+    }
+    return origin;
+  } catch {
+    let str = rawUrl.split("?")[0].split("#")[0].replace(/\/+$/, "");
+    if (str.includes("ais-dev-")) {
+      str = str.replace("ais-dev-", "ais-pre-");
+    }
+    return str;
+  }
+}
+
+// Compute clean redirect URI strictly matching Google Cloud OAuth console configurations
+function getEffectiveRedirectUri(candidateOrigin?: string): string {
+  if (process.env.GOOGLE_REDIRECT_URI) {
+    let uri = process.env.GOOGLE_REDIRECT_URI.trim();
+    if (uri.includes("ais-dev-")) uri = uri.replace("ais-dev-", "ais-pre-");
+    return uri;
+  }
+
+  const baseOrigin = extractOriginBaseUrl(candidateOrigin) || extractOriginBaseUrl(process.env.APP_URL) || "http://localhost:3000";
+  return `${baseOrigin}/api/oauth/callback`;
+}
+
 // Instantiate OAuth Client lazily to prevent boot crashes if variables are missing
 function getOAuthClient(customRedirectUri?: string) {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
   
-  let redirectUri = customRedirectUri || process.env.GOOGLE_REDIRECT_URI;
-  if (!redirectUri) {
-    let baseUrl = process.env.APP_URL || "http://localhost:3000";
-    if (baseUrl.includes("ais-dev-")) {
-      baseUrl = baseUrl.replace("ais-dev-", "ais-pre-");
-    }
-    redirectUri = `${baseUrl}/api/oauth/callback`;
-  }
-
-  if (redirectUri && redirectUri.includes("ais-dev-")) {
-    redirectUri = redirectUri.replace("ais-dev-", "ais-pre-");
-  }
+  const redirectUri = customRedirectUri || getEffectiveRedirectUri();
 
   if (!clientId || !clientSecret) {
     throw new Error("Google Client ID or Google Client Secret is not configured in your Environment Secrets.");
@@ -491,18 +511,7 @@ app.get("/api/status", async (req, res) => {
   const appUrlConfigured = !!process.env.APP_URL;
 
   // Compute the expected redirect URI
-  let computedRedirectUri = process.env.GOOGLE_REDIRECT_URI;
-  if (!computedRedirectUri) {
-    let baseUrl = process.env.APP_URL || "http://localhost:3000";
-    if (baseUrl.includes("ais-dev-")) {
-      baseUrl = baseUrl.replace("ais-dev-", "ais-pre-");
-    }
-    computedRedirectUri = `${baseUrl}/api/oauth/callback`;
-  }
-
-  if (computedRedirectUri && computedRedirectUri.includes("ais-dev-")) {
-    computedRedirectUri = computedRedirectUri.replace("ais-dev-", "ais-pre-");
-  }
+  const computedRedirectUri = getEffectiveRedirectUri();
 
   // Diagnostics check
   const clientIdTrimmed = rawClientId.trim();
@@ -688,16 +697,7 @@ app.get("/api/auth/url", (req, res) => {
     const useFullScope = req.query.full === "true";
     const originParam = req.query.origin ? String(req.query.origin) : "";
     
-    let dynamicBaseUrl = originParam || process.env.APP_URL || "http://localhost:3000";
-    if (dynamicBaseUrl.includes("ais-dev-")) {
-      dynamicBaseUrl = dynamicBaseUrl.replace("ais-dev-", "ais-pre-");
-    }
-
-    let computedRedirectUri = process.env.GOOGLE_REDIRECT_URI || `${dynamicBaseUrl}/api/oauth/callback`;
-    if (computedRedirectUri.includes("ais-dev-")) {
-      computedRedirectUri = computedRedirectUri.replace("ais-dev-", "ais-pre-");
-    }
-
+    const computedRedirectUri = getEffectiveRedirectUri(originParam);
     const oauth2Client = getOAuthClient(computedRedirectUri);
     
     const scopes = useFullScope
@@ -794,16 +794,7 @@ app.get("/api/oauth/callback", async (req, res) => {
   }
 
   try {
-    let dynamicBaseUrl = redirectOrigin || process.env.APP_URL || "http://localhost:3000";
-    if (dynamicBaseUrl.includes("ais-dev-")) {
-      dynamicBaseUrl = dynamicBaseUrl.replace("ais-dev-", "ais-pre-");
-    }
-
-    let computedRedirectUri = process.env.GOOGLE_REDIRECT_URI || `${dynamicBaseUrl}/api/oauth/callback`;
-    if (computedRedirectUri.includes("ais-dev-")) {
-      computedRedirectUri = computedRedirectUri.replace("ais-dev-", "ais-pre-");
-    }
-
+    const computedRedirectUri = getEffectiveRedirectUri(redirectOrigin);
     const oauth2Client = getOAuthClient(computedRedirectUri);
     const { tokens } = await oauth2Client.getToken(String(code));
     
