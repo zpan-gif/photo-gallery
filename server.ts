@@ -636,6 +636,18 @@ app.get("/api/status", async (req, res) => {
         }
       }
     }
+  } else if (!targetFolderId && creds && creds.refreshToken) {
+    // Authenticated owner who has connected Google Drive but not selected/created a folder yet
+    canEdit = true;
+    userRole = "owner";
+    isOwner = true;
+    isCoHost = false;
+    coHostPermissions = {
+      canTogglePrivacy: true,
+      canDeletePhotos: true,
+      canManageCohosts: true,
+      canEditSettings: true,
+    };
   } else if (isKeyAuthorized) {
     // Legacy key authorization (direct key link)
     canEdit = true;

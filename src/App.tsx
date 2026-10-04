@@ -315,7 +315,7 @@ export default function App() {
   const isCoHost = Boolean(status?.isCoHost || (isCoHostRoleUrl && (status?.isHost || status?.canEdit)));
   const isOwner = Boolean(
     (status?.connected ?? false) &&
-    (status?.isOwner !== undefined ? status.isOwner : (status?.userRole === "owner" || (!isCoHost && !guestFolderId)))
+    (status?.isOwner || status?.userRole === "owner" || (!isCoHost && !guestFolderId))
   );
 
   const canModerate = Boolean(
@@ -973,7 +973,13 @@ export default function App() {
     // Listen to OAUTH popup postMessage events to support elegant in-context integration
     const handleOAuthMessage = (event: MessageEvent) => {
       const origin = event.origin;
-      if (!origin.endsWith(".run.app") && !origin.endsWith(".onrender.com") && !origin.includes("localhost") && !origin.includes("127.0.0.1")) {
+      if (
+        origin !== window.location.origin &&
+        !origin.endsWith(".run.app") &&
+        !origin.endsWith(".onrender.com") &&
+        !origin.includes("localhost") &&
+        !origin.includes("127.0.0.1")
+      ) {
         return;
       }
 
@@ -3077,8 +3083,11 @@ export default function App() {
                                     <span>Loading your Google Drive folders...</span>
                                   </div>
                                 ) : folders.length === 0 ? (
-                                  <div className="p-5 border border-slate-200 dark:border-slate-800 border-dashed rounded-2xl text-center bg-white dark:bg-slate-900 text-xs text-slate-500">
-                                    No other Drive folders found.
+                                  <div className="p-5 border border-slate-200 dark:border-slate-800 border-dashed rounded-2xl text-center bg-white dark:bg-slate-900 space-y-1.5">
+                                    <p className="text-xs font-semibold text-slate-800 dark:text-slate-200">No app folders found yet</p>
+                                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed max-w-xs mx-auto">
+                                      Create a folder above using "Create a new folder" to get started with your new album.
+                                    </p>
                                   </div>
                                 ) : (
                                   <div className="space-y-2">
@@ -3955,7 +3964,7 @@ export default function App() {
             {renderOnboardingStepsHeader(1)}
             {renderInstructionsPlaybook()}
           </div>
-        ) : status?.connected && (!status?.folderId || status?.folderName === "App Uploads Gallery" || forceSelectFolderState) && !guestFolderId && (isOwner || isCoHost) ? (
+        ) : status?.connected && (!status?.folderId || status?.folderName === "App Uploads Gallery" || forceSelectFolderState) && !guestFolderId ? (
           /* FORCED FOLDER CONFIGURATION CARD FOR OWNER OR CO-HOST */
           <div className="bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-[32px] p-6 sm:p-10 shadow-xs max-w-lg mx-auto space-y-6 animate-fade-in" id="forced_folder_activation">
             {renderOnboardingStepsHeader(2)}
@@ -4040,8 +4049,11 @@ export default function App() {
                     <span className="text-xs text-slate-400">Loading folders...</span>
                   </div>
                 ) : folders.length === 0 && sharedFolders.length === 0 ? (
-                  <div className="p-8 border border-slate-150 dark:border-slate-800 border-dashed rounded-2xl text-center bg-slate-50/50">
-                    <p className="text-xs text-slate-500 dark:text-slate-400">No Drive folders found.</p>
+                  <div className="p-6 border border-slate-200 dark:border-slate-800 border-dashed rounded-2xl text-center bg-slate-50/50 dark:bg-slate-950/20 space-y-2">
+                    <p className="text-xs font-semibold text-slate-800 dark:text-slate-200">No app folders found yet</p>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed max-w-sm mx-auto">
+                      For security and privacy, Google only allows GuestDrive to access folders created through this app. Type a name in <strong>"➕ Create a new folder"</strong> above to launch your first album!
+                    </p>
                   </div>
                 ) : (
                   <div className="space-y-2">
